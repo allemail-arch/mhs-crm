@@ -198,7 +198,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
-  filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
+  filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
   searchQ:'', searchResults:[], reportTab:'attendance', toastMsg:'', busy:false };
 
 const CFG=()=>state.cfg||{teams:{}};
@@ -228,9 +228,12 @@ function downloadXLSX(filename, sheets){
   XLSX.writeFile(wb, filename);
 }
 /* PDF — title + one or more tables. tables=[{caption, head:[...], body:[[...]]}] */
-function downloadPDF(filename, title, tables){
+function downloadPDF(filename, title, tables, xlsxFallback){
   const JS = window.jspdf && window.jspdf.jsPDF;
-  if(!JS){ alert('PDF library not loaded — please check your internet and try again.'); return; }
+  if(!JS){ /* PDF lib not ready — fall back to Excel, never block the page */
+    state.toastMsg='PDF library still loading — exported as Excel instead.';
+    if(xlsxFallback) downloadXLSX(filename.replace(/\.pdf$/,'.xlsx'), xlsxFallback);
+    render(); return; }
   const doc=new JS({orientation:'landscape'});
   doc.setFontSize(14); doc.text(title,14,15);
   let y=22;
@@ -276,7 +279,7 @@ function buildReportExport(kind){
   return null;
 }
 function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
-  if(fmt==='pdf') downloadPDF(r.name+'.pdf', r.title, r.tables);
+  if(fmt==='pdf') downloadPDF(r.name+'.pdf', r.title, r.tables, r.sheets);
   else downloadXLSX(r.name+'.xlsx', r.sheets); }
 function dlButtons(kind){ return `<button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="xlsx">⬇ Excel</button> <button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="pdf">⬇ PDF</button>`; }
 
@@ -301,7 +304,7 @@ async function loadRouteData(){
   } else if(r==='leads'||r==='myleads'){
     const q=new URLSearchParams(); const f=state.filters;
     if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner);
-    if(f.product)q.set('product',f.product); if(f.open)q.set('open','1'); if(f.overdue)q.set('overdue','1');
+    if(f.product)q.set('product',f.product); if(f.open)q.set('open','1'); if(f.overdue)q.set('overdue','1'); if(f.duetoday)q.set('duetoday','1');
     state.leads=(await api('/api/leads?'+q.toString())).leads;
   } else if(r==='followups'){
     state.leads=(await api('/api/leads')).leads;
@@ -453,9 +456,20 @@ function renderDashboard(){
     const openLs=state.leads.filter(l=>l.next_followup && STATUS[l.status]?.open);
     const todayLs=openLs.filter(l=>isOverdue(l.next_followup)||isToday(l.next_followup)).sort((a,b)=>parseD(a.next_followup)-parseD(b.next_followup));
     const first=esc(state.user.name.split(' ')[0]);
+    // morning summary counts
+    const freshN=state.leads.filter(l=>l.status==='Fresh').length;
+    const dueTodayN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isToday(l.next_followup)).length;
+    const missedN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isOverdue(l.next_followup)).length;
+    const openN=state.leads.filter(l=>STATUS[l.status]?.open).length;
+    const summary=`<div class="kpis" style="margin-bottom:16px">
+      <div class="kpi" data-drill data-fstatus="Fresh" style="cursor:pointer;border-left:4px solid #3b5bdb"><div class="lbl">🆕 Fresh Leads (today)</div><div class="val b">${freshN}</div><div class="sub">new leads to work</div></div>
+      <div class="kpi" data-drill data-fduetoday="1" style="cursor:pointer;border-left:4px solid #f5a623"><div class="lbl">📅 Today's Follow-ups</div><div class="val o">${dueTodayN}</div><div class="sub">due today — click to open</div></div>
+      <div class="kpi" data-drill data-foverdue="1" style="cursor:pointer;border-left:4px solid #e5484d"><div class="lbl">🔴 Missed Follow-ups</div><div class="val" style="color:var(--red)">${missedN}</div><div class="sub">overdue — do these first</div></div>
+      <div class="kpi" data-drill data-fopen="1" style="cursor:pointer;border-left:4px solid #12a150"><div class="lbl">📋 Open Leads</div><div class="val g">${openN}</div><div class="sub">total in your pipeline</div></div></div>`;
     const list=todayLs.length?`<div class="cards" style="display:flex">${todayLs.map(todayCallCard).join('')}</div>`
       :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 All calls done for today!</div></div>`;
     return `<div class="page-h"><h2>Hello, ${first} 👋</h2></div>
+      ${summary}
       <div class="panel" style="margin-bottom:16px;border:2px solid #ffe0c2">
         <div class="panel-h" style="color:var(--orange)">📞 Calls to make today — ${todayLs.length} leads<span class="badge b-rnr">Priority</span></div>
         <div class="panel-b">${list}</div></div>
@@ -539,7 +553,7 @@ function filterBar(showOwner){
   const srOpt=srcList().map(s=>`<option ${f.source===s?'selected':''}>${s}</option>`).join('');
   const owOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}" ${f.product===p?'selected':''}>${teamName(p)}</option>`).join('');
-  const any=f.status||f.source||f.owner||f.product||f.open||f.overdue||f.q;
+  const any=f.status||f.source||f.owner||f.product||f.open||f.overdue||f.duetoday||f.q;
   return `<div class="filters">
     <input class="search" id="fq" placeholder="🔍  Search name, phone, city…" value="${esc(f.q)}">
     <select id="fstatus"><option value="">All Status</option>${stOpt}</select>
@@ -548,6 +562,7 @@ function filterBar(showOwner){
     ${showOwner?`<select id="fowner"><option value="">All Owners</option>${owOpt}</select>`:''}
     ${f.open?'<span class="pill">Open only</span>':''}
     ${f.overdue?'<span class="pill" style="background:#fdecea;color:#c0392b">⏰ Overdue follow-ups only</span>':''}
+    ${f.duetoday?'<span class="pill" style="background:#fff4e5;color:#c77700">📅 Due today only</span>':''}
     ${any?'<button class="btn ghost sm" data-action="clearfilters">✕ Clear</button>':''}</div>`;
 }
 function renderLeads(mineOnly){
@@ -568,7 +583,7 @@ function renderLeads(mineOnly){
         <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
         <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
-  const importBtn = state.user.role!=='sales' ? `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>` : '';
+  const importBtn = `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>`;
   return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
     ${filterBar(showOwner)}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
 }
@@ -601,17 +616,20 @@ function renderFollowups(){
 
 /* ---------------- USERS ---------------- */
 function renderUsers(){
+  const isAdmin=state.user.role==='admin';
   const roleB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
+  const actionBtns=u=>isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${u.id}">Edit</button> <button class="btn ghost sm" data-action="transferuser" data-uid="${u.id}">Transfer leads</button> <button class="btn ghost sm" style="color:var(--red);border-color:#ffd0cf" data-action="deleteuser" data-uid="${u.id}">Delete</button>`:'';
   const rows=state.users.map(u=>`<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="avatar">${initials(u.name)}</div>
-    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></div></div></td>
+    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'no email yet')}</div></div></div></td>
     <td>${roleB(u.role)}</td><td>${u.team==='-'?'—':`<span class="pill">${teamName(u.team)}</span>`}</td>
-    <td class="num">${u.role==='sales'?u.leads:'—'}</td></tr>`).join('');
+    <td class="num">${u.role==='sales'?u.leads:'—'}</td>${isAdmin?`<td>${actionBtns(u)}</td>`:''}</tr>`).join('');
   const cards=state.users.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
     <div class="avatar">${initials(u.name)}</div><div><div class="nm" style="font-size:14px">${esc(u.name)}</div>
-    <div class="meta">${u.team==='-'?'':teamName(u.team)}</div></div></div>${roleB(u.role)}</div></div>`).join('');
+    <div class="meta">${u.team==='-'?'':teamName(u.team)} • ${esc(u.email||'no email yet')}</div></div></div>${roleB(u.role)}</div>
+    ${isAdmin?`<div class="acts" style="margin-top:10px;flex-wrap:wrap">${actionBtns(u)}</div>`:''}</div>`).join('');
   return `<div class="page-h"><h2>Team</h2><span class="cnt">${state.users.length} users</span><div class="spacer"></div>
     <button class="btn" data-action="adduser">+ Add User</button></div>
-    <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Team / Product</th><th style="text-align:right">Leads</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Team / Product</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead><tbody>${rows}</tbody></table></div>
     <div class="cards">${cards}</div>`;
 }
 
@@ -675,7 +693,7 @@ function importModal(){
   IMPORT_ROWS=[];
   openModal(`<div class="modal"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. Only <b>Name</b> is required. Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped.</div>
+      <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. <b>Name and Phone are required.</b> Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped (one phone = one lead).</div>
       <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="margin-bottom:12px;width:100%">
       <div id="importInfo" class="lead-sub" style="min-height:18px;margin-bottom:10px"></div>
       <button class="btn block" data-action="doimport" id="doImportBtn" disabled style="opacity:.5">Import</button>
@@ -709,9 +727,11 @@ function parseImportFile(file){
       else { if(typeof XLSX==='undefined'){ info.innerHTML='<span style="color:var(--red)">Excel reader did not load — check your internet or use a CSV.</span>'; return; }
         const data=new Uint8Array(e.target.result); const wb=XLSX.read(data,{type:'array'});
         rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}); }
-      IMPORT_ROWS=rows.map(mapImportRow).filter(r=>r.name);
-      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">No valid leads found (check the Name column).</span>'; return; }
-      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads found ✓</b> — click "Import".';
+      const allMapped=rows.map(mapImportRow).filter(r=>r.name);
+      IMPORT_ROWS=allMapped.filter(r=>String(r.phone||'').replace(/\D/g,'').length>=7);
+      const noPhone=allMapped.length-IMPORT_ROWS.length;
+      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">No valid leads found — each row needs a Name and a Phone number.</span>'; return; }
+      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads found ✓</b>'+(noPhone?' <span style="color:var(--red)">('+noPhone+' skipped — no phone)</span>':'')+' — click "Import".';
       const btn=document.getElementById('doImportBtn'); btn.disabled=false; btn.style.opacity='1';
     }catch(err){ info.innerHTML='<span style="color:var(--red)">File error: '+err.message+'</span>'; } };
   if(isCsv) reader.readAsText(file); else reader.readAsArrayBuffer(file);
@@ -851,8 +871,8 @@ function addLeadModal(){
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add New Lead</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="field"><label>Name</label><input id="nl_name" placeholder="Customer name"></div>
-      <div class="field"><label>Phone</label><input id="nl_phone" placeholder="+91 …"></div>
+      <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nl_name" placeholder="Customer name"></div>
+      <div class="field"><label>Phone <span style="color:var(--red)">* (required — one phone = one lead)</span></label><input id="nl_phone" placeholder="+91 …"></div>
       <div class="field"><label>Email</label><input id="nl_email"></div>
       <div class="field"><label>City</label><input id="nl_city"></div>
       <div class="field"><label>Product</label><select id="nl_product">${prOpt}</select></div>
@@ -873,14 +893,48 @@ function addUserModal(){
   const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}">${teamName(k)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Team Member</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="field"><label>Name</label><input id="nu_name"></div>
-      <div class="field"><label>Email</label><input id="nu_email"></div>
-      <div class="field"><label>Phone</label><input id="nu_phone" placeholder="+91 …"></div>
+      <div class="lead-sub" style="margin-bottom:10px">Tip: you can create a placeholder like "User 1" with just a name + PIN now, and add the real name/email later from Edit.</div>
+      <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nu_name" placeholder="e.g. User 1"></div>
+      <div class="field"><label>Email <span class="lead-sub">(optional — add later)</span></label><input id="nu_email"></div>
+      <div class="field"><label>Phone <span class="lead-sub">(optional)</span></label><input id="nu_phone" placeholder="+91 …"></div>
       <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Team Lead</option><option value="admin">Admin</option></select></div>
       <div class="field"><label>Team / Product</label><select id="nu_team">${teamOpt}</select></div>
       <div class="field"><label>Department</label><input id="nu_dept" placeholder="e.g. Pre Sales / TFD Sales"></div>
-      <div class="field"><label>Login PIN (4 digit)</label><input id="nu_pin" maxlength="4" placeholder="e.g. 4321"></div>
+      <div class="field"><label>Login PIN (4 digit) <span style="color:var(--red)">*</span></label><input id="nu_pin" maxlength="4" placeholder="e.g. 4321"></div>
       <button class="btn block" data-action="saveuser">Add Member</button></div></div>`);
+}
+function editUserModal(uid){
+  const u=state.users.find(x=>x.id===uid); if(!u)return;
+  const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}" ${u.team===k?'selected':''}>${teamName(k)}</option>`).join('');
+  const roleOpt=[['sales','Sales'],['lead','Team Lead'],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${r[1]}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>Edit User</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Name</label><input id="eu_name" value="${esc(u.name)}"></div>
+      <div class="field"><label>Email <span class="lead-sub">(add when the person is finalised)</span></label><input id="eu_email" value="${esc(u.email||'')}" placeholder="add later"></div>
+      <div class="field"><label>Phone</label><input id="eu_phone" value="${esc(u.phone||'')}" placeholder="+91 …"></div>
+      <div class="field"><label>Role</label><select id="eu_role">${roleOpt}</select></div>
+      <div class="field"><label>Team / Product</label><select id="eu_team">${teamOpt}</select></div>
+      <div class="field"><label>Department</label><input id="eu_dept" value="${esc(u.department||'')}"></div>
+      <div class="field"><label>Reset PIN <span class="lead-sub">(leave blank to keep current)</span></label><input id="eu_pin" maxlength="4" placeholder="new 4-digit PIN"></div>
+      <button class="btn block" data-action="saveedituser" data-uid="${u.id}">Save changes</button></div></div>`);
+}
+function transferUserModal(uid){
+  const u=state.users.find(x=>x.id===uid); if(!u)return;
+  const others=state.users.filter(x=>x.id!==uid && x.role!=='admin');
+  const opt=others.map(x=>`<option value="${x.id}">${esc(x.name)} (${teamCode(x.team)})</option>`).join('')||'<option value="">No other agent available</option>';
+  openModal(`<div class="modal"><div class="modal-h"><h3>Transfer leads</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">Move all of <b>${esc(u.name)}</b>'s <b>${u.leads||0}</b> leads to another agent (use this when someone leaves or goes on leave).</div>
+      <div class="field"><label>Transfer to</label><select id="tr_to">${opt}</select></div>
+      <button class="btn block" data-action="dotransfer" data-uid="${uid}">Transfer ${u.leads||0} leads</button></div></div>`);
+}
+function reminderModal(id, status){
+  const today=todayStr();
+  openModal(`<div class="modal"><div class="modal-h"><h3>⏰ Set a reminder (required)</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">A follow-up reminder is required for status <b>${esc(status)}</b>. The lead will appear in Follow-ups on this date.</div>
+      <div class="field"><label>Next follow-up date <span style="color:var(--red)">*</span></label><input type="date" id="rem_date" value="${today}" min="${today}"></div>
+      <button class="btn block" data-action="savereminder" data-lead="${id}" data-status="${esc(status)}">Save status + reminder</button></div></div>`);
 }
 
 /* ============================================================ EVENTS ============================================================ */
@@ -901,6 +955,23 @@ document.addEventListener('click',async function(e){
     if(a==='logout'){ if(confirm('Log out?')) logout(); return; }
     if(a==='addlead'){ return addLeadModal(); }
     if(a==='adduser'){ return addUserModal(); }
+    if(a==='edituser'){ return editUserModal(act.dataset.uid); }
+    if(a==='transferuser'){ return transferUserModal(act.dataset.uid); }
+    if(a==='saveedituser'){ const uid=act.dataset.uid; const name=gv('eu_name'); if(!name){alert('Enter a name');return;}
+      const body={name,email:gv('eu_email'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept')};
+      const pin=gv('eu_pin'); if(pin){ if(pin.length!==4){alert('PIN must be 4 digits');return;} body.pin=pin; }
+      const r=await api('/api/users/'+uid,'PATCH',body); if(r.error){alert(r.error);return;}
+      closeModal(); state.toastMsg='User updated ✓'; return refresh(); }
+    if(a==='dotransfer'){ const uid=act.dataset.uid; const to=document.getElementById('tr_to').value; if(!to){alert('Choose an agent to transfer to');return;}
+      const r=await api('/api/users/'+uid+'/transfer','POST',{to}); if(r.error){alert(r.error);return;}
+      closeModal(); state.toastMsg='✅ '+r.moved+' leads transferred to '+r.to; return refresh(); }
+    if(a==='deleteuser'){ const uid=act.dataset.uid; const u=state.users.find(x=>x.id===uid);
+      if(confirm('Delete user '+(u?u.name:'')+'?\nTheir leads will become unassigned — use "Transfer leads" first if you want to keep them.')){
+        const r=await api('/api/users/'+uid,'DELETE'); if(r.error){alert(r.error);return;}
+        state.toastMsg='User deleted'+(r.unassigned?' — '+r.unassigned+' leads unassigned':''); return refresh(); } return; }
+    if(a==='savereminder'){ const date=gv('rem_date'); if(!date){alert('Please pick a date');return;}
+      const r=await api('/api/leads/'+id,'PATCH',{status:act.dataset.status,next_followup:date}); if(r.error){alert(r.error);return;}
+      closeModal(); state.toastMsg='Status + reminder set ✓'; return refresh(); }
     if(a==='deletelead'){ if(confirm('Delete this lead? It will be recorded in the delete report.')){ await api('/api/leads/'+id,'DELETE'); state.toastMsg='🗑️ Lead deleted'; return go(state.user.role==='sales'?'myleads':'leads'); } return; }
     if(a==='rtab'){ state.reportTab=act.dataset.tab; return render(); }
     if(a==='dosearch'){ state.searchQ=gv('searchBox'); return go('search'); }
@@ -928,15 +999,17 @@ document.addEventListener('click',async function(e){
       state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer')}; return refresh(); }
     if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:''}; return refresh(); }
     if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Opening email…'; return refresh(); }
-    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:''}; return refresh(); }
+    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}; return refresh(); }
     if(a==='closemodal'){ return closeModal(); }
     if(a==='savelead'){
       const name=gv('nl_name'); if(!name){alert('Enter a name');return;}
-      const body={name,phone:gv('nl_phone'),email:gv('nl_email'),city:gv('nl_city'),
+      const phone=gv('nl_phone'); if(phone.replace(/\D/g,'').length<7){alert('Enter a valid phone number (required).');return;}
+      const body={name,phone,email:gv('nl_email'),city:gv('nl_city'),
         product:document.getElementById('nl_product').value,source:document.getElementById('nl_source').value,
         owner_id:document.getElementById('nl_owner').value};
       const r=await api('/api/leads','POST',body);
       if(r.duplicate){ alert('This phone number already exists — lead "'+r.lead.name+'" is owned by '+r.owner_name+'. One phone = one lead.'); return; }
+      if(r.error){ alert(r.error); return; }
       closeModal();
       state.toastMsg='Lead added → '+r.lead.owner_name; return refresh();
     }
@@ -955,7 +1028,7 @@ document.addEventListener('click',async function(e){
   }
   const drill=e.target.closest('[data-drill],[data-drillowner]');
   if(drill){ const d=drill.dataset;
-    state.filters={q:'',status:d.fstatus||d.drillstatus||'',source:d.fsource||'',owner:d.fowner||d.drillowner||'',product:d.fproduct||'',open:d.fopen||'',overdue:d.foverdue||''};
+    state.filters={q:'',status:d.fstatus||d.drillstatus||'',source:d.fsource||'',owner:d.fowner||d.drillowner||'',product:d.fproduct||'',open:d.fopen||'',overdue:d.foverdue||'',duetoday:d.fduetoday||''};
     return go('leads'); }
   const lead=e.target.closest('[data-lead]');
   if(lead && !e.target.closest('[data-action]')){ return go('lead',{id:lead.dataset.lead}); }
@@ -966,7 +1039,11 @@ document.addEventListener('change',async function(e){
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
   if(el.id==='demoSel'){ if(el.value){ const pin=el.value; state.pin=pin; render(); return doLogin(pin); } return; }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
-  if(a==='setstatus'){ await api('/api/leads/'+id,'PATCH',{status:el.value}); state.toastMsg=(STATUS[el.value]?.won?'🎉 WON! Pushed to Customer CRM.':'Status updated'); return refresh(); }
+  if(a==='setstatus'){ const st=el.value; const l=findLeadLocal(id); const NEEDS=['RNR','Follow Up','Interested'];
+    if(NEEDS.includes(st) && !(l&&l.next_followup)){ return reminderModal(id, st); }
+    const r=await api('/api/leads/'+id,'PATCH',{status:st});
+    if(r&&r.error==='reminder_required'){ return reminderModal(id, st); }
+    state.toastMsg=(STATUS[st]?.won?'🎉 WON! Pushed to Customer CRM.':'Status updated'); return refresh(); }
   if(a==='setfollow'){ await api('/api/leads/'+id,'PATCH',{next_followup:el.value||null}); state.toastMsg='Reminder set'; return refresh(); }
   if(a==='setowner'){ await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
   if(el.id==='fstatus'){ state.filters.status=el.value; return refresh(); }

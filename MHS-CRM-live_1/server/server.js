@@ -460,6 +460,45 @@ const server = http.createServer(async (req, res) => {
           .run(id, b.name, b.email || null, b.role || 'sales', b.team || 'MHS', b.department || null, b.phone || null, hash, salt);
         return send(res, 200, { ok: true, id });
       }
+      // transfer a user's leads to another user (data transfer when agent leaves/changes)
+      let um = p.match(/^\/api\/users\/([^/]+)\/transfer$/);
+      if (um && m === 'POST') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const b = await readBody(req); const fromId = um[1]; const toId = b.to;
+        const to = db.prepare('SELECT * FROM users WHERE id=?').get(toId);
+        if (!to) return err(res, 400, 'target user not found');
+        if (fromId === toId) return err(res, 400, 'source and target are the same user');
+        const r = db.prepare('UPDATE leads SET owner_id=? WHERE owner_id=? AND deleted=0').run(toId, fromId);
+        return send(res, 200, { ok: true, moved: r.changes, to: to.name });
+      }
+      // edit a user (name/email/phone/role/team/department, optional PIN reset)
+      um = p.match(/^\/api\/users\/([^/]+)$/);
+      if (um && m === 'PATCH') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const b = await readBody(req); const u = db.prepare('SELECT * FROM users WHERE id=?').get(um[1]);
+        if (!u) return err(res, 404, 'user not found');
+        const sets = [], args = [];
+        for (const f of ['name', 'email', 'role', 'team', 'department', 'phone']) {
+          if (b[f] !== undefined) { sets.push(f + '=?'); args.push(b[f] === '' ? null : b[f]); }
+        }
+        if (b.pin) { const { hash, salt } = hashPin(b.pin); sets.push('pin_hash=?', 'pin_salt=?'); args.push(hash, salt); }
+        if (!sets.length) return send(res, 200, { ok: true });
+        args.push(u.id);
+        db.prepare('UPDATE users SET ' + sets.join(', ') + ' WHERE id=?').run(...args);
+        return send(res, 200, { ok: true });
+      }
+      // delete a user (admin). Cannot delete self or the last admin. Their leads are unassigned.
+      if (um && m === 'DELETE') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const u = db.prepare('SELECT * FROM users WHERE id=?').get(um[1]);
+        if (!u) return err(res, 404, 'user not found');
+        if (u.id === user.id) return err(res, 400, 'You cannot delete your own account');
+        if (u.role === 'admin' && db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin'").get().n <= 1) return err(res, 400, 'Cannot delete the last admin');
+        const openLeads = db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0').get(u.id).n;
+        db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+        db.prepare('UPDATE leads SET owner_id=NULL WHERE owner_id=?').run(u.id);
+        return send(res, 200, { ok: true, unassigned: openLeads });
+      }
 
       // leads
       if (p === '/api/leads' && m === 'GET') {
@@ -472,6 +511,7 @@ const server = http.createServer(async (req, res) => {
         if (q.get('product')) { where += ' AND product=?'; args.push(q.get('product')); }
         if (q.get('open')) { where += " AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
         if (q.get('overdue')) { where += " AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
+        if (q.get('duetoday')) { where += " AND next_followup = date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
         if (q.get('q')) { where += ' AND (name LIKE ? OR phone LIKE ? OR city LIKE ? OR email LIKE ?)'; const t = '%' + q.get('q') + '%'; args.push(t, t, t, t); }
         const rows = db.prepare(`SELECT * FROM leads WHERE ${where} ORDER BY created_at DESC`).all(...args);
         return send(res, 200, { leads: rows.map(r => leadJSON(r)) });
@@ -479,6 +519,7 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/leads' && m === 'POST') {
         const b = await readBody(req);
         if (!b.name) return err(res, 400, 'name required');
+        if (normPhone(b.phone).length < 7) return err(res, 400, 'A valid phone number is required');
         const autoAssign = b.owner_id === 'auto' || !b.owner_id;
         const { lead, deduped } = createLead({ ...b, owner_id: autoAssign ? null : b.owner_id }, user.name, { autoAssign });
         if (deduped) { const o = userById(lead.owner_id); return send(res, 200, { duplicate: true, owner_name: o ? o.name : '—', lead: leadJSON(lead, true) }); }
@@ -527,9 +568,15 @@ const server = http.createServer(async (req, res) => {
       if (mm && m === 'GET') { const r = leadRow(mm[1]); return r ? send(res, 200, { lead: leadJSON(r, true) }) : err(res, 404, 'not found'); }
       if (mm && m === 'PATCH') {
         const b = await readBody(req); const lead = leadRow(mm[1]); if (!lead) return err(res, 404, 'not found');
+        // reminder is mandatory when moving a lead to RNR / Follow Up / Interested
+        const REMINDER_STATUSES = ['RNR', 'Follow Up', 'Interested'];
+        if (b.status && REMINDER_STATUSES.includes(b.status) && !b.next_followup && !lead.next_followup) {
+          return err(res, 400, 'reminder_required');
+        }
+        // apply the follow-up date first so applyStatusChange doesn't overwrite it
+        if (b.next_followup !== undefined) { db.prepare('UPDATE leads SET next_followup=? WHERE id=?').run(b.next_followup || null, lead.id); logAct(lead.id, '⏰ Reminder set', b.next_followup || 'cleared', user.name); lead.next_followup = b.next_followup || null; }
         if (b.status && b.status !== lead.status) await applyStatusChange(lead, b.status, user.name);
         if (b.owner_id && b.owner_id !== lead.owner_id) { db.prepare('UPDATE leads SET owner_id=? WHERE id=?').run(b.owner_id, lead.id); logAct(lead.id, '🔁 Reassigned to ' + (userById(b.owner_id)?.name || b.owner_id), '', user.name); }
-        if (b.next_followup !== undefined) { db.prepare('UPDATE leads SET next_followup=? WHERE id=?').run(b.next_followup || null, lead.id); logAct(lead.id, '⏰ Reminder set', b.next_followup || 'cleared', user.name); }
         return send(res, 200, { ok: true, lead: leadJSON(leadRow(lead.id), true) });
       }
       mm = p.match(/^\/api\/leads\/([^/]+)\/(activity|call|miss|whatsapp|email)$/);
