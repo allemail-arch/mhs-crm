@@ -107,6 +107,17 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_logins_user ON logins(user_id);
 
+  CREATE TABLE IF NOT EXISTS lead_deletions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id       TEXT,
+    lead_name     TEXT,
+    phone         TEXT,
+    deleted_by    TEXT,
+    deleted_by_name TEXT,
+    department    TEXT,
+    created_at    TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_leads_owner  ON leads(owner_id);
   CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
   CREATE INDEX IF NOT EXISTS idx_act_lead     ON activities(lead_id);
@@ -123,6 +134,11 @@ const insSrc = db.prepare(`INSERT OR IGNORE INTO sources(name,color,icon) VALUES
 for (const s of DEFAULT_SOURCES) insSrc.run(s.name, s.color, s.icon);
 const insSet = db.prepare(`INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)`);
 for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insSet.run(k, String(v));
+
+// add soft-delete columns to leads if missing (for existing DBs)
+for (const col of ['deleted INTEGER DEFAULT 0', 'deleted_by TEXT', 'deleted_at TEXT']) {
+  try { db.exec('ALTER TABLE leads ADD COLUMN ' + col); } catch (e) {}
+}
 
 /* ---------- helpers ---------- */
 function hashPin(pin, salt) {

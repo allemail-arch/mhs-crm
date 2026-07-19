@@ -177,7 +177,7 @@ function scopeSql(user) {
 function leadWhere(user, f) {
   f = f || {};
   const s = scopeSql(user);
-  let where = s.where, args = [...s.args];
+  let where = '(' + s.where + ') AND deleted=0', args = [...s.args];
   if (f.from) { where += " AND date(created_at) >= date(?)"; args.push(f.from); }
   if (f.to) { where += " AND date(created_at) <= date(?)"; args.push(f.to); }
   if (f.source) { where += " AND source=?"; args.push(f.source); }
@@ -209,7 +209,7 @@ function reportAgents(user, f) {
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const cols = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   return sales.map(u => {
-    let w = 'owner_id=?', a = [u.id];
+    let w = 'owner_id=? AND deleted=0', a = [u.id];
     if (f.from) { w += " AND date(created_at)>=date(?)"; a.push(f.from); }
     if (f.to) { w += " AND date(created_at)<=date(?)"; a.push(f.to); }
     if (f.source) { w += " AND source=?"; a.push(f.source); }
@@ -229,13 +229,13 @@ function reportActivity(user, f) {
       WHERE connected=1 AND date(created_at)=date('now') GROUP BY owner_id`).all();
   const cMap = Object.fromEntries(rows.map(r => [r.oid, r]));
   return sales.map(u => {
-    const junk = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND status='Junk'").get(u.id).n;
+    const junk = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND status='Junk' AND deleted=0").get(u.id).n;
     const c = cMap[u.id] || { c: 0, t: 0 };
     // avg first-response minutes (lead created → first CONNECTED call)
     const resp = db.prepare(`SELECT AVG(mins) m FROM (
         SELECT (julianday(MIN(ca.created_at)) - julianday(l.created_at))*24*60 mins
         FROM leads l JOIN calls ca ON ca.lead_id=l.id
-        WHERE l.owner_id=? AND ca.connected=1 GROUP BY l.id)`).get(u.id).m;
+        WHERE l.owner_id=? AND l.deleted=0 AND ca.connected=1 GROUP BY l.id)`).get(u.id).m;
     return { id: u.id, name: u.name, team: u.team, callsToday: c.c, talktime: c.t || 0,
       avgRespMin: resp ? Math.max(0, Math.round(resp)) : null, junk, working: c.c > 0 };
   });
@@ -249,8 +249,8 @@ function reportFollowups(user, f) {
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const per = sales.map(u => {
-    const missed = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
-    const todayDue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND next_followup = date('now') AND status IN ${OPEN}`).get(u.id).n;
+    const missed = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
+    const todayDue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup = date('now') AND status IN ${OPEN}`).get(u.id).n;
     return { id: u.id, name: u.name, team: u.team, missed, todayDue };
   });
   const teams = {};
@@ -279,11 +279,29 @@ function reportLeadsDist(user, f) {
   const sales = activeSales(teamFilter);
   const cols = cfg.STATUS_LIST;
   const per = sales.map(u => {
-    const rows = db.prepare("SELECT status FROM leads WHERE owner_id=? AND date(created_at)>=date(?) AND date(created_at)<=date(?)").all(u.id, from, to);
+    const rows = db.prepare("SELECT status FROM leads WHERE owner_id=? AND deleted=0 AND date(created_at)>=date(?) AND date(created_at)<=date(?)").all(u.id, from, to);
     const counts = {}; cols.forEach(c => counts[c] = rows.filter(r => r.status === c).length);
     return { id: u.id, name: u.name, department: u.department || '—', team: u.team, total: rows.length, counts };
   });
   return { from, to, cols, per };
+}
+
+// deleted-leads report: total + per user + department-wise + recent list
+function reportDeletions(user) {
+  const total = db.prepare('SELECT COUNT(*) n FROM lead_deletions').get().n;
+  const per = db.prepare("SELECT deleted_by_name name, COALESCE(department,'—') department, COUNT(*) c FROM lead_deletions GROUP BY deleted_by ORDER BY c DESC").all();
+  const byDept = db.prepare("SELECT COALESCE(department,'—') department, COUNT(*) c FROM lead_deletions GROUP BY department ORDER BY c DESC").all();
+  const recent = db.prepare('SELECT lead_name, phone, deleted_by_name, department, created_at FROM lead_deletions ORDER BY id DESC LIMIT 100').all();
+  return { total, per, byDept, recent };
+}
+// user-list report: counts by role + department-wise + full list
+function reportUsersList(user) {
+  const users = db.prepare('SELECT id,name,email,role,team,department,active FROM users ORDER BY role, department, name').all();
+  const counts = { total: users.length, admin: 0, lead: 0, sales: 0 };
+  users.forEach(u => { counts[u.role] = (counts[u.role] || 0) + 1; });
+  const byDept = {};
+  users.forEach(u => { const d = u.department || '—'; const x = byDept[d] = byDept[d] || { department: d, admin: 0, lead: 0, sales: 0, total: 0 }; x[u.role] = (x[u.role] || 0) + 1; x.total++; });
+  return { counts, byDept: Object.values(byDept), users };
 }
 
 /* ---------------- static ---------------- */
@@ -419,7 +437,7 @@ const server = http.createServer(async (req, res) => {
       // users
       if (p === '/api/users' && m === 'GET') {
         const rows = db.prepare('SELECT id,name,email,role,team,department,phone,active FROM users ORDER BY role, name').all();
-        const withLoad = rows.map(u => ({ ...u, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=?').get(u.id).n }));
+        const withLoad = rows.map(u => ({ ...u, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0').get(u.id).n }));
         return send(res, 200, { users: withLoad });
       }
       if (p === '/api/users' && m === 'POST') {
@@ -436,11 +454,13 @@ const server = http.createServer(async (req, res) => {
       // leads
       if (p === '/api/leads' && m === 'GET') {
         const s = scopeSql(user);
-        let where = s.where, args = [...s.args];
+        let where = '(' + s.where + ') AND deleted=0', args = [...s.args];
         const q = url.searchParams;
         if (q.get('status')) { where += ' AND status=?'; args.push(q.get('status')); }
         if (q.get('source')) { where += ' AND source=?'; args.push(q.get('source')); }
         if (q.get('owner')) { where += ' AND owner_id=?'; args.push(q.get('owner')); }
+        if (q.get('product')) { where += ' AND product=?'; args.push(q.get('product')); }
+        if (q.get('open')) { where += " AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
         if (q.get('q')) { where += ' AND (name LIKE ? OR phone LIKE ? OR city LIKE ? OR email LIKE ?)'; const t = '%' + q.get('q') + '%'; args.push(t, t, t, t); }
         const rows = db.prepare(`SELECT * FROM leads WHERE ${where} ORDER BY created_at DESC`).all(...args);
         return send(res, 200, { leads: rows.map(r => leadJSON(r)) });
@@ -472,7 +492,25 @@ const server = http.createServer(async (req, res) => {
         }
         return send(res, 200, { ok: true, created, skipped, byAgent });
       }
+      // global search — find any lead + who owns it (available to all roles)
+      if (p === '/api/leads/search' && m === 'GET') {
+        const qq = (url.searchParams.get('q') || '').trim();
+        if (qq.length < 1) return send(res, 200, { leads: [] });
+        const t = '%' + qq + '%';
+        const rows = db.prepare(`SELECT id,name,phone,email,city,product,source,status,owner_id FROM leads
+          WHERE deleted=0 AND (name LIKE ? OR phone LIKE ? OR email LIKE ? OR city LIKE ?) ORDER BY created_at DESC LIMIT 50`).all(t, t, t, t);
+        return send(res, 200, { leads: rows.map(r => { const o = userById(r.owner_id); return { ...r, owner_name: o ? o.name : '—', owner_team: o ? o.team : '' }; }) });
+      }
       let mm = p.match(/^\/api\/leads\/([^/]+)$/);
+      if (mm && m === 'DELETE') {
+        const lead = leadRow(mm[1]); if (!lead) return err(res, 404, 'not found');
+        if (!lead.deleted) {
+          db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now') WHERE id=?").run(user.id, lead.id);
+          db.prepare('INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department) VALUES(?,?,?,?,?,?)')
+            .run(lead.id, lead.name, lead.phone, user.id, user.name, user.department || null);
+        }
+        return send(res, 200, { ok: true });
+      }
       if (mm && m === 'GET') { const r = leadRow(mm[1]); return r ? send(res, 200, { lead: leadJSON(r, true) }) : err(res, 404, 'not found'); }
       if (mm && m === 'PATCH') {
         const b = await readBody(req); const lead = leadRow(mm[1]); if (!lead) return err(res, 404, 'not found');
@@ -509,11 +547,13 @@ const server = http.createServer(async (req, res) => {
         if (p === '/api/reports/followups') return send(res, 200, reportFollowups(user, f));
         if (p === '/api/reports/attendance') return send(res, 200, reportAttendance(user));
         if (p === '/api/reports/leads-distribution') return send(res, 200, reportLeadsDist(user, f));
+        if (p === '/api/reports/deletions') return send(res, 200, reportDeletions(user));
+        if (p === '/api/reports/users') return send(res, 200, reportUsersList(user));
       }
 
       // connectors
       if (p === '/api/connectors' && m === 'GET') {
-        const rows = db.prepare('SELECT * FROM connectors').all().map(c => ({ ...c, connected: !!c.connected, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE source=?').get(c.src).n }));
+        const rows = db.prepare('SELECT * FROM connectors').all().map(c => ({ ...c, connected: !!c.connected, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE source=? AND deleted=0').get(c.src).n }));
         return send(res, 200, { connectors: rows });
       }
       mm = p.match(/^\/api\/connectors\/([^/]+)$/);
