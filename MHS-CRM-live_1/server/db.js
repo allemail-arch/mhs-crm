@@ -100,6 +100,13 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_calls_owner ON calls(owner_id);
 
+  CREATE TABLE IF NOT EXISTS logins (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_logins_user ON logins(user_id);
+
   CREATE INDEX IF NOT EXISTS idx_leads_owner  ON leads(owner_id);
   CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
   CREATE INDEX IF NOT EXISTS idx_act_lead     ON activities(lead_id);

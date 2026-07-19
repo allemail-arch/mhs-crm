@@ -213,6 +213,10 @@ function isOverdue(s){ if(!s)return false; const t=new Date();t.setHours(0,0,0,0
 function isToday(s){ if(!s)return false; const t=new Date(),x=parseD(s); return x.getDate()===t.getDate()&&x.getMonth()===t.getMonth()&&x.getFullYear()===t.getFullYear(); }
 function scoreTier(v){ if(v>=75)return{t:'Hot',c:'#e5484d'}; if(v>=55)return{t:'Warm',c:'#f5a623'}; return{t:'Cold',c:'#6b7488'}; }
 function fmtDur(s){ s=+s||0; if(!s)return '—'; const m=Math.floor(s/60),ss=s%60; return m?m+'m '+ss+'s':ss+'s'; }
+const todayStr=()=>new Date().toISOString().slice(0,10);
+function loginTime(s){ if(!s)return '—'; try{ return new Date(String(s).replace(' ','T')+'Z').toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }catch(_){ return s; } }
+function downloadCSV(filename, rows){ const csv=rows.map(r=>r.map(c=>{c=String(c==null?'':c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c;}).join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
 
 /* ---------------- API ---------------- */
 async function api(path,method='GET',body){
@@ -241,6 +245,10 @@ async function loadRouteData(){
     if(role!=='sales') state.reports.followups=await api('/api/reports/followups');
   } else if(r==='settings'){
     state.settings=(await api('/api/settings')).settings;
+  } else if(r==='reports'){
+    state.reports.attendance=await api('/api/reports/attendance');
+    state.reports.leadsDist=await api('/api/reports/leads-distribution'+(state.reportDate?('?from='+state.reportDate+'&to='+state.reportDate):''));
+    state.reports.followups=await api('/api/reports/followups');
   } else if(r==='users'){
     state.users=(await api('/api/users')).users;
   } else if(r==='connectors'){
@@ -294,7 +302,7 @@ function renderLogin(){
 
 function navItems(){
   const r=state.user.role;
-  if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['settings','Settings','⚙️']];
+  if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['settings','Settings','⚙️'],['reports','Reports','📄']];
   if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰']];
   return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰']];
 }
@@ -324,6 +332,7 @@ function pageContent(){
     case 'users': return renderUsers();
     case 'connectors': return renderConnectors();
     case 'settings': return renderSettings();
+    case 'reports': return renderReports();
     case 'lead': return renderLeadDetail();
     default: return renderDashboard();
   }
@@ -414,7 +423,7 @@ function renderDashboard(){
       <td class="num" ${respFlag}>${a.avgRespMin!=null?a.avgRespMin+' min':'—'}</td>
       <td class="num" ${a.junk>=3?'style="color:var(--red);font-weight:700"':''}>${a.junk}</td></tr>`;}).join('');
   const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — kaun kaam kar raha hai
-    <span class="lead-sub">calls = connected only • avg response = lead aane se pehli call tak</span></div>
+    <span class="lead-sub">🟢 Working = aaj connected call kiya • ⚪ Idle = aaj koi call nahi • Calls = connected only • Avg response = lead aane se pehli call tak</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th>Status</th><th style="text-align:right">Calls today</th><th style="text-align:right">Talk time</th><th style="text-align:right">Avg response</th><th style="text-align:right">Junk</th></tr></thead>
     <tbody>${actRows}</tbody></table></div></div>`;
 
@@ -422,11 +431,12 @@ function renderDashboard(){
   const cols=['Fresh','Follow Up','Interested','Not Interested','Closed Won'];
   const sorted=agents.slice().sort((a,b)=>a.team.localeCompare(b.team)||a.name.localeCompare(b.name));
   let rows='',lastTeam='';
-  sorted.forEach(u=>{const cells=cols.map(c=>`<td class="num">${u.counts[c]||'<span style="color:#c4c9d4">0</span>'}</td>`).join('');
+  sorted.forEach(u=>{const cells=cols.map(c=>{const v=u.counts[c]||0;
+      return `<td class="num" ${v?`data-drillowner="${u.id}" data-drillstatus="${c}" style="cursor:pointer;color:var(--blue);font-weight:700"`:''}>${v||'<span style="color:#c4c9d4">0</span>'}</td>`;}).join('');
     const teamCell=u.team!==lastTeam?`<td class="grp-td">${teamName(u.team)}</td>`:'<td></td>'; lastTeam=u.team;
-    rows+=`<tr data-owner="${u.id}">${teamCell}<td><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></td>
-      <td class="num" style="font-weight:800">${u.total}</td>${cells}</tr>`;});
-  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent</div>
+    rows+=`<tr>${teamCell}<td data-drillowner="${u.id}" style="cursor:pointer"><div class="lead-nm" style="color:var(--blue)">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></td>
+      <td class="num" style="font-weight:800;cursor:pointer;color:var(--blue)" data-drillowner="${u.id}">${u.total}</td>${cells}</tr>`;});
+  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent<span class="lead-sub">kisi number/naam pe click karo → wo leads khul jayenge</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Team</th><th>Owner</th><th style="text-align:right">Total</th>
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
@@ -643,6 +653,40 @@ function addSourceModal(){
       <button class="btn block" data-action="savesource">Add Source</button></div></div>`);
 }
 
+/* ---------------- REPORTS (Admin, downloadable) ---------------- */
+function renderReports(){
+  const att=state.reports.attendance||{present:0,absent:0,total:0,byDept:[],per:[]};
+  const ld=state.reports.leadsDist||{from:'',to:'',cols:[],per:[]};
+  const fu=state.reports.followups||{per:[],teams:[]};
+
+  const deptRows=att.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num" style="color:var(--green);font-weight:700">${d.present}</td><td class="num" style="color:var(--red);font-weight:700">${d.absent}</td><td class="num">${d.total}</td></tr>`).join('');
+  const userRows=att.per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.department)}</span></td>
+    <td>${u.present?'<span class="badge b-interested">● Present</span>':'<span class="badge b-lost">● Absent</span>'}</td>
+    <td class="lead-sub">${loginTime(u.lastLogin)}</td></tr>`).join('');
+  const attPanel=`<div class="panel"><div class="panel-h">🟢 Attendance — aaj (kaun login kiya)<button class="btn ghost sm" data-action="dl-attendance">⬇ Download</button></div>
+    <div class="panel-b">
+      <div class="kpis" style="margin-bottom:12px">
+        <div class="kpi"><div class="lbl">Present today</div><div class="val g">${att.present}</div></div>
+        <div class="kpi"><div class="lbl">Absent</div><div class="val" style="color:var(--red)">${att.absent}</div></div>
+        <div class="kpi"><div class="lbl">Total users</div><div class="val b">${att.total}</div></div>
+        <div class="kpi"><div class="lbl">Present %</div><div class="val">${att.total?Math.round(att.present/att.total*100):0}%</div></div></div>
+      <div class="grid2"><div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Present</th><th style="text-align:right">Absent</th><th style="text-align:right">Total</th></tr></thead><tbody>${deptRows}</tbody></table></div>
+      <div style="overflow-x:auto"><b class="lead-sub">User wise</b><table><thead><tr><th>User</th><th>Status</th><th>Last login</th></tr></thead><tbody>${userRows}</tbody></table></div></div>
+    </div></div>`;
+
+  const ldRows=ld.per.map(u=>{const cells=ld.cols.map(c=>`<td class="num">${u.counts[c]||0}</td>`).join('');
+    return `<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.department)}</span></td><td class="num" style="font-weight:800">${u.total}</td>${cells}</tr>`;}).join('');
+  const ldPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">📥 Leads Distribution — ${ld.from===ld.to?ld.from:(ld.from+' → '+ld.to)}
+    <span><input type="date" id="rptDate" value="${esc(state.reportDate||ld.from)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px"> <button class="btn sm" data-action="rptdate">Apply</button> <button class="btn ghost sm" data-action="dl-leadsdist">⬇ Download</button></span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th style="text-align:right">Total</th>${ld.cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${ldRows||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">Is din koi lead assign nahi hua</td></tr>'}</tbody></table></div></div>`;
+
+  const fuRows=fu.per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
+  const fuPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">🔴 Follow-up Missed Report<button class="btn ghost sm" data-action="dl-followups">⬇ Download</button></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${fuRows}</tbody></table></div></div>`;
+
+  return `<div class="page-h"><h2>Reports</h2><span class="cnt">roz shaam download karo</span></div>${attPanel}${ldPanel}${fuPanel}`;
+}
+
 /* ---------------- LEAD DETAIL ---------------- */
 function renderLeadDetail(){
   const l=state.currentLead; if(!l) return renderLeads(false);
@@ -736,6 +780,10 @@ document.addEventListener('click',async function(e){
     if(a==='logout'){ if(confirm('Logout karna hai?')) logout(); return; }
     if(a==='addlead'){ return addLeadModal(); }
     if(a==='adduser'){ return addUserModal(); }
+    if(a==='rptdate'){ state.reportDate=gv('rptDate'); return refresh(); }
+    if(a==='dl-attendance'){ const x=state.reports.attendance; if(!x)return; downloadCSV('attendance-'+todayStr()+'.csv',[['User','Department','Role','Status','Last login'],...x.per.map(u=>[u.name,u.department,u.role,u.present?'Present':'Absent',loginTime(u.lastLogin)])]); return; }
+    if(a==='dl-leadsdist'){ const x=state.reports.leadsDist; if(!x)return; downloadCSV('leads-distribution-'+(x.from||todayStr())+'.csv',[['Agent','Department','Total',...x.cols],...x.per.map(u=>[u.name,u.department,u.total,...x.cols.map(c=>u.counts[c]||0)])]); return; }
+    if(a==='dl-followups'){ const x=state.reports.followups; if(!x)return; downloadCSV('followup-missed-'+todayStr()+'.csv',[['User','Team','Overall missed','Today due'],...x.per.map(u=>[u.name,u.team,u.missed,u.todayDue])]); return; }
     if(a==='import'){ return importModal(); }
     if(a==='samplecsv'){ return downloadSampleCsv(); }
     if(a==='doimport'){ if(!IMPORT_ROWS.length) return; const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS}); closeModal();
@@ -780,6 +828,8 @@ document.addEventListener('click',async function(e){
     if(a==='addnote'){ const v=gv('noteBox'); if(v){ await api('/api/leads/'+id+'/activity','POST',{title:'📝 Note',sub:v}); state.toastMsg='Note save ho gaya'; return refresh(); } return; }
     return;
   }
+  const drill=e.target.closest('[data-drillowner]');
+  if(drill){ state.filters={q:'',status:drill.dataset.drillstatus||'',source:'',owner:drill.dataset.drillowner}; return go('leads'); }
   const lead=e.target.closest('[data-lead]');
   if(lead && !e.target.closest('[data-action]')){ return go('lead',{id:lead.dataset.lead}); }
 });

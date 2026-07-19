@@ -196,7 +196,9 @@ function reportSummary(user, f) {
   const open = rows.filter(r => cfg.STATUS[r.status]?.open).length;
   const interested = rows.filter(r => r.status === 'Interested').length;
   const bySource = cfg.SOURCES.map(src => ({ src, n: rows.filter(r => r.source === src).length }));
-  const funnel = cfg.STATUS_LIST.map(st => ({ st, n: rows.filter(r => r.status === st).length }));
+  // Sales funnel = 5 core pipeline stages (RNR/Junk/Lost are side-states, tracked elsewhere)
+  const CORE_STAGES = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
+  const funnel = CORE_STAGES.map(st => ({ st, n: rows.filter(r => r.status === st).length }));
   return { total, won, open, interested, conv: total ? Math.round(won / total * 100) : 0, bySource, funnel };
 }
 function reportAgents(user, f) {
@@ -254,6 +256,34 @@ function reportFollowups(user, f) {
   const teams = {};
   per.forEach(x => { const t = teams[x.team] = teams[x.team] || { team: x.team, missed: 0, todayDue: 0 }; t.missed += x.missed; t.todayDue += x.todayDue; });
   return { per: per.sort((a, b) => b.missed - a.missed), teams: Object.values(teams) };
+}
+
+// attendance: who logged in today (present) vs not (absent), + department-wise
+function reportAttendance(user) {
+  const users = db.prepare("SELECT id,name,role,team,department FROM users WHERE active=1 ORDER BY department, name").all();
+  const todays = db.prepare("SELECT user_id, MAX(created_at) last, COUNT(*) c FROM logins WHERE date(created_at)=date('now') GROUP BY user_id").all();
+  const lastMap = Object.fromEntries(todays.map(r => [r.user_id, r]));
+  const per = users.map(u => ({ id: u.id, name: u.name, role: u.role, team: u.team, department: u.department || '—',
+    present: !!lastMap[u.id], lastLogin: lastMap[u.id] ? lastMap[u.id].last : null, logins: lastMap[u.id] ? lastMap[u.id].c : 0 }));
+  const byDept = {};
+  per.forEach(p => { const d = byDept[p.department] = byDept[p.department] || { department: p.department, present: 0, absent: 0, total: 0 }; d.total++; p.present ? d.present++ : d.absent++; });
+  const present = per.filter(p => p.present).length;
+  return { present, absent: per.length - present, total: per.length, byDept: Object.values(byDept), per };
+}
+// leads distribution: per agent, leads assigned in range (default today) + status breakdown
+function reportLeadsDist(user, f) {
+  f = f || {};
+  const from = f.from || new Date().toISOString().slice(0, 10);
+  const to = f.to || from;
+  const teamFilter = user.role === 'admin' ? '' : user.team;
+  const sales = activeSales(teamFilter);
+  const cols = cfg.STATUS_LIST;
+  const per = sales.map(u => {
+    const rows = db.prepare("SELECT status FROM leads WHERE owner_id=? AND date(created_at)>=date(?) AND date(created_at)<=date(?)").all(u.id, from, to);
+    const counts = {}; cols.forEach(c => counts[c] = rows.filter(r => r.status === c).length);
+    return { id: u.id, name: u.name, department: u.department || '—', team: u.team, total: rows.length, counts };
+  });
+  return { from, to, cols, per };
 }
 
 /* ---------------- static ---------------- */
@@ -336,6 +366,7 @@ const server = http.createServer(async (req, res) => {
         return err(res, 401, 'Galat PIN');
       }
       loginFails.delete(ip);
+      try { db.prepare('INSERT INTO logins(user_id) VALUES(?)').run(u.id); } catch (e) {}
       return send(res, 200, { token: signToken({ uid: u.id, role: u.role, team: u.team }), user: publicUser(u) });
     }
 
@@ -476,6 +507,8 @@ const server = http.createServer(async (req, res) => {
         if (p === '/api/reports/agents') return send(res, 200, { agents: reportAgents(user, f) });
         if (p === '/api/reports/activity') return send(res, 200, { activity: reportActivity(user, f) });
         if (p === '/api/reports/followups') return send(res, 200, reportFollowups(user, f));
+        if (p === '/api/reports/attendance') return send(res, 200, reportAttendance(user));
+        if (p === '/api/reports/leads-distribution') return send(res, 200, reportLeadsDist(user, f));
       }
 
       // connectors
