@@ -354,7 +354,6 @@ function render(){
 function renderLogin(){
   const dots=[0,1,2,3].map(i=>`<div class="pin-dot ${i<state.pin.length?'on':''}"></div>`).join('');
   const keys=[1,2,3,4,5,6,7,8,9].map(n=>`<button class="key" data-key="${n}">${n}</button>`).join('');
-  const opts=DEMO.map(d=>`<option value="${d[2]}">${d[1]} (PIN ${d[2]})</option>`).join('');
   return `<div class="login-wrap"><div class="login-card">
     <div class="brand"><div class="logo">M<b>H</b>S</div><h1>MHS CRM</h1></div>
     <div class="sub">Lead Management • Sales • Reports</div>
@@ -365,8 +364,6 @@ function renderLogin(){
       <button class="key" data-key="0">0</button>
       <button class="key fn" data-key="back">⌫</button></div>
     <div class="login-err">${state.loginErr||''}</div>
-    <div class="demo-box"><div class="t">Demo — quick login</div>
-      <select class="demo-sel" id="demoSel"><option value="">Choose a user…</option>${opts}</select></div>
   </div></div>`;
 }
 
@@ -1037,7 +1034,6 @@ document.addEventListener('click',async function(e){
 document.addEventListener('change',async function(e){
   const el=e.target;
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
-  if(el.id==='demoSel'){ if(el.value){ const pin=el.value; state.pin=pin; render(); return doLogin(pin); } return; }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
   if(a==='setstatus'){ const st=el.value; const l=findLeadLocal(id); const NEEDS=['RNR','Follow Up','Interested'];
     if(NEEDS.includes(st) && !(l&&l.next_followup)){ return reminderModal(id, st); }
