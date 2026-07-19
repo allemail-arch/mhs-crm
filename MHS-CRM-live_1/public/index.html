@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MHS CRM</title>
+<style>
+  :root{
+    --navy:#14213d; --navy2:#1d3a63; --blue:#2d5be3; --blue-l:#eaf0ff;
+    --orange:#ff6a00; --bg:#f4f6fb; --card:#ffffff; --line:#e6e9f2;
+    --text:#1a2233; --muted:#6b7488; --green:#12a150; --red:#e5484d;
+    --amber:#f5a623; --purple:#7c5cff; --shadow:0 1px 3px rgba(20,33,61,.08),0 8px 24px rgba(20,33,61,.06);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+    background:var(--bg);color:var(--text);font-size:14px;line-height:1.45}
+  button{font-family:inherit;cursor:pointer;border:none;background:none}
+  input,select,textarea{font-family:inherit;font-size:14px}
+  a{color:var(--blue);text-decoration:none}
+  .hidden{display:none !important}
+  .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,#14213d 0%,#1d3a63 60%,#2d5be3 130%);padding:20px}
+  .login-card{background:#fff;border-radius:20px;box-shadow:var(--shadow);width:100%;max-width:400px;
+    padding:30px 26px;text-align:center}
+  .brand{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:4px}
+  .brand .logo{width:40px;height:40px;border-radius:11px;background:var(--navy);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:17px}
+  .brand .logo b{color:var(--orange)}
+  .brand h1{font-size:20px;margin:0;letter-spacing:.3px}
+  .sub{color:var(--muted);font-size:12.5px;margin:6px 0 20px}
+  .pin-display{display:flex;gap:10px;justify-content:center;margin:8px 0 16px}
+  .pin-dot{width:15px;height:15px;border-radius:50%;border:2px solid var(--line);background:#fff}
+  .pin-dot.on{background:var(--blue);border-color:var(--blue)}
+  .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;max-width:260px;margin:0 auto}
+  .key{height:56px;border-radius:14px;background:var(--bg);font-size:22px;font-weight:600;color:var(--navy);
+    display:flex;align-items:center;justify-content:center;transition:.1s;border:1px solid var(--line)}
+  .key:active{background:var(--blue-l);transform:scale(.96)}
+  .key.fn{font-size:14px;color:var(--muted);font-weight:600}
+  .login-err{color:var(--red);font-size:12.5px;height:16px;margin-top:12px}
+  .demo-box{margin-top:22px;border-top:1px dashed var(--line);padding-top:16px;text-align:left}
+  .demo-box .t{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:8px;font-weight:700}
+  .demo-sel{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:#fff}
+  .app{min-height:100vh;padding-bottom:76px}
+  .topbar{position:sticky;top:0;z-index:30;background:#fff;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:14px;padding:10px 18px}
+  .topbar .logo{width:34px;height:34px;border-radius:9px;background:var(--navy);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex:0 0 auto}
+  .topbar .logo b{color:var(--orange)}
+  .topnav{display:flex;gap:4px;margin-left:8px}
+  .topnav a{padding:8px 14px;border-radius:9px;color:var(--muted);font-weight:600;font-size:13.5px}
+  .topnav a.active{background:var(--blue-l);color:var(--blue)}
+  .topnav a:hover{color:var(--navy)}
+  .spacer{flex:1}
+  .userchip{display:flex;align-items:center;gap:9px;cursor:pointer;padding:5px 8px;border-radius:10px}
+  .userchip:hover{background:var(--bg)}
+  .avatar{width:32px;height:32px;border-radius:50%;background:var(--blue);color:#fff;display:flex;
+    align-items:center;justify-content:center;font-weight:700;font-size:12.5px;flex:0 0 auto}
+  .userchip .nm{font-weight:700;font-size:13px;line-height:1.1}
+  .userchip .rl{font-size:11px;color:var(--muted)}
+  .btn{background:var(--blue);color:#fff;padding:9px 16px;border-radius:10px;font-weight:700;font-size:13.5px}
+  .btn:hover{background:#2049c9}
+  .btn.orange{background:var(--orange)} .btn.orange:hover{background:#e85f00}
+  .btn.ghost{background:#fff;color:var(--navy);border:1px solid var(--line)}
+  .btn.ghost:hover{background:var(--bg)}
+  .btn.sm{padding:7px 12px;font-size:12.5px}
+  .btn.block{width:100%;justify-content:center;display:flex}
+  .content{max-width:1180px;margin:0 auto;padding:20px 18px}
+  .page-h{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .page-h h2{margin:0;font-size:20px}
+  .page-h .cnt{color:var(--muted);font-weight:600}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px;box-shadow:var(--shadow)}
+  .kpi .lbl{color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+  .kpi .val{font-size:26px;font-weight:800;margin-top:4px}
+  .kpi .sub{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .kpi .val.g{color:var(--green)} .kpi .val.b{color:var(--blue)} .kpi .val.o{color:var(--orange)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+  .panel-h{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:700;display:flex;align-items:center;justify-content:space-between}
+  .panel-b{padding:14px 16px}
+  .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:11px}
+  .bar-row .nm{width:96px;font-size:12.5px;font-weight:600;flex:0 0 auto}
+  .bar-track{flex:1;height:20px;background:var(--bg);border-radius:8px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:8px}
+  .bar-row .n{width:34px;text-align:right;font-weight:700;font-size:12.5px}
+  .funnel .fr{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .funnel .fr .lb{width:110px;font-size:12.5px;font-weight:600}
+  .funnel .fr .fb{flex:1;height:26px;border-radius:7px;color:#fff;font-weight:700;font-size:12px;
+    display:flex;align-items:center;padding:0 10px}
+  .table-wrap{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  thead th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
+    background:#fafbff;padding:12px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap}
+  tbody td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fafbff;cursor:pointer}
+  .lead-nm{font-weight:700}
+  .lead-sub{font-size:11.5px;color:var(--muted)}
+  td.num{text-align:right;font-weight:600}
+  .grp-td{font-weight:800;color:var(--navy)}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:700;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:50%}
+  .b-fresh{background:#eef2ff;color:#3b5bdb}
+  .b-rnr{background:#fff4e5;color:#c77700}
+  .b-follow{background:#e7f3ff;color:#1971c2}
+  .b-interested{background:#e6f7ee;color:#0b8a43}
+  .b-notint{background:#fdecea;color:#c0392b}
+  .b-junk{background:#f1f3f5;color:#868e96}
+  .b-won{background:#e6f7ee;color:#0b8a43}
+  .b-lost{background:#fdecea;color:#c0392b}
+  .src{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--navy)}
+  .src .si{width:20px;height:20px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;font-weight:800}
+  .pill{padding:2px 9px;border-radius:7px;background:var(--bg);font-size:11.5px;font-weight:700;color:var(--navy)}
+  .overdue{color:var(--red);font-weight:700}
+  .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+  .filters input,.filters select{padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
+  .search{flex:1;min-width:180px}
+  .cards{display:none;flex-direction:column;gap:12px}
+  .lcard{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:14px}
+  .lcard .top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+  .lcard .nm{font-weight:800;font-size:15px}
+  .lcard .meta{font-size:12px;color:var(--muted);margin-top:2px}
+  .lcard .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+  .lcard .acts{display:flex;gap:8px;margin-top:12px}
+  .lcard .acts .btn{flex:1}
+  .ico-btn{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:17px;flex:0 0 auto}
+  .ico-call{background:#e6f7ee;color:var(--green)}
+  .ico-wa{background:#e7fbef;color:#25d366}
+  .botnav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:40;background:#fff;
+    border-top:1px solid var(--line);padding:6px 4px 8px;justify-content:space-around}
+  .botnav a{display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--muted);font-size:10.5px;font-weight:700;padding:5px 10px;border-radius:10px;flex:1}
+  .botnav a.active{color:var(--blue)}
+  .botnav .bi{font-size:19px}
+  .ld-head{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}
+  .ld-head .r1{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .ld-avatar{width:52px;height:52px;border-radius:14px;background:var(--navy);color:#fff;display:flex;
+    align-items:center;justify-content:center;font-weight:800;font-size:19px}
+  .ld-head h2{margin:0;font-size:21px}
+  .ld-contact{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;color:var(--muted);font-size:13px}
+  .ld-contact b{color:var(--text)}
+  .ld-actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+  .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+  .field label{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+  .field input,.field select,.field textarea{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;width:100%}
+  .timeline{list-style:none;margin:0;padding:0}
+  .timeline li{position:relative;padding:0 0 16px 22px;border-left:2px solid var(--line);margin-left:6px}
+  .timeline li:last-child{border-left-color:transparent}
+  .timeline li:before{content:'';position:absolute;left:-7px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--blue);border:2px solid #fff}
+  .timeline .tt{font-weight:700;font-size:13px}
+  .timeline .tm{font-size:11.5px;color:var(--muted)}
+  .modal-bg{position:fixed;inset:0;background:rgba(20,33,61,.5);z-index:60;display:flex;align-items:center;justify-content:center;padding:18px}
+  .modal{background:#fff;border-radius:16px;width:100%;max-width:480px;max-height:90vh;overflow:auto;box-shadow:var(--shadow)}
+  .modal-h{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .modal-h h3{margin:0;font-size:17px}
+  .modal-b{padding:18px}
+  .x{font-size:22px;color:var(--muted);cursor:pointer;line-height:1}
+  .toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;
+    padding:12px 18px;border-radius:12px;font-weight:600;font-size:13px;z-index:80;box-shadow:var(--shadow);
+    display:flex;align-items:center;gap:9px;max-width:90vw}
+  .toast .ok{width:20px;height:20px;border-radius:50%;background:var(--green);display:flex;align-items:center;justify-content:center;font-size:12px}
+  .convo{display:inline-flex;align-items:center;gap:6px;background:#e6f7ee;color:var(--green);padding:4px 11px;border-radius:20px;font-weight:700;font-size:12px}
+  @media(max-width:820px){ .kpis{grid-template-columns:1fr 1fr} .grid2{grid-template-columns:1fr} }
+  @media(max-width:720px){
+    .topnav{display:none} .botnav{display:flex} .userchip .nm,.userchip .rl{display:none}
+    .table-wrap{display:none} .cards{display:flex} .content{padding:16px 14px}
+    .page-h h2{font-size:18px} .desktop-only{display:none !important} .add-lead-top{display:none}
+  }
+  @media(min-width:721px){ .mobile-only{display:none !important} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+/* ============================================================
+   MHS CRM — frontend (talks to the real backend API)
+   ============================================================ */
+
+/* presentation maps (colors/icons only; data comes from API) */
+const SOURCES={Facebook:{c:'#1877f2',i:'f'},Calendly:{c:'#006bff',i:'C'},LinkedIn:{c:'#0a66c2',i:'in'},
+  Website:{c:'#ff6a00',i:'W'},WhatsApp:{c:'#25d366',i:'wa'},'Bulk Upload':{c:'#7c5cff',i:'B'},Manual:{c:'#6b7488',i:'M'}};
+const STATUS={
+  'Fresh':{cls:'b-fresh',dot:'#3b5bdb',open:true,fresh:true},'RNR':{cls:'b-rnr',dot:'#c77700',open:true},
+  'Follow Up':{cls:'b-follow',dot:'#1971c2',open:true},'Interested':{cls:'b-interested',dot:'#0b8a43',open:true},
+  'Not Interested':{cls:'b-notint',dot:'#c0392b',open:false},'Junk':{cls:'b-junk',dot:'#868e96',open:false},
+  'Closed Won':{cls:'b-won',dot:'#0b8a43',open:false,won:true},'Closed Lost':{cls:'b-lost',dot:'#c0392b',open:false}};
+const STATUS_LIST=Object.keys(STATUS);
+/* demo quick-login PINs (remove in production) */
+const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta — Team Lead','2222'],
+  ['s01','Abhishek Bhadoriya — Sales','0001'],['s02','Aishwarya Deshmukh — Sales','0002'],
+  ['s03','Akshay Bhosale — Sales','0003'],['s04','Akshay Sangle — Sales','0004'],
+  ['s05','Ankit Singh — Sales','0005'],['s06','Anu Sharma — Sales','0006'],
+  ['s07','Anurag Das — Sales','0007'],['s08','Arati Innani — Sales','0008'],
+  ['s09','Babitha Bhuwalia — Sales','0009'],['s10','Prachi Nair — Sales','0010']];
+
+const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
+  leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
+  filters:{q:'',status:'',source:'',owner:''}, dateFilter:{from:'',to:''}, toastMsg:'', busy:false };
+
+const CFG=()=>state.cfg||{teams:{}};
+const teamName=k=>esc(CFG().teams[k]?.name||k);
+const teamCode=k=>CFG().teams[k]?.code||k;
+const salesUsers=()=>state.users.filter(u=>u.role==='sales');
+const userById=id=>state.users.find(u=>u.id===id);
+const initials=n=>String(n||'').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
+/* escape ALL user-provided text before putting it in innerHTML (prevents XSS) */
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function parseD(s){ if(!s)return null; return new Date(String(s).length<=10?s+'T00:00:00':String(s).replace(' ','T')); }
+function fmtDate(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}):'—'; }
+function fmtDateTime(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):''; }
+function isOverdue(s){ if(!s)return false; const t=new Date();t.setHours(0,0,0,0); const x=parseD(s);x.setHours(0,0,0,0); return x<t; }
+function isToday(s){ if(!s)return false; const t=new Date(),x=parseD(s); return x.getDate()===t.getDate()&&x.getMonth()===t.getMonth()&&x.getFullYear()===t.getFullYear(); }
+function scoreTier(v){ if(v>=75)return{t:'Hot',c:'#e5484d'}; if(v>=55)return{t:'Warm',c:'#f5a623'}; return{t:'Cold',c:'#6b7488'}; }
+function fmtDur(s){ s=+s||0; if(!s)return '—'; const m=Math.floor(s/60),ss=s%60; return m?m+'m '+ss+'s':ss+'s'; }
+
+/* ---------------- API ---------------- */
+async function api(path,method='GET',body){
+  const opt={method,headers:{}};
+  if(state.token) opt.headers['Authorization']='Bearer '+state.token;
+  if(body){ opt.headers['Content-Type']='application/json'; opt.body=JSON.stringify(body); }
+  const r=await fetch(path,opt);
+  if(r.status===401 && state.user){ logout(); throw new Error('session expired'); }
+  return r.json();
+}
+async function loadRouteData(){
+  const r=state.route, role=state.user.role;
+  if(r==='dashboard'){
+    const df=state.dateFilter; const qs=[]; if(df.from)qs.push('from='+df.from); if(df.to)qs.push('to='+df.to);
+    state.reports.summary=await api('/api/reports/summary'+(qs.length?'?'+qs.join('&'):''));
+    if(role==='sales'){ state.leads=(await api('/api/leads')).leads; }
+    else { state.reports.agents=(await api('/api/reports/agents')).agents; state.reports.activity=(await api('/api/reports/activity')).activity; }
+  } else if(r==='leads'||r==='myleads'){
+    const q=new URLSearchParams(); const f=state.filters;
+    if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner);
+    state.leads=(await api('/api/leads?'+q.toString())).leads;
+  } else if(r==='followups'){
+    state.leads=(await api('/api/leads')).leads;
+    if(role!=='sales') state.reports.followups=await api('/api/reports/followups');
+  } else if(r==='settings'){
+    state.settings=(await api('/api/settings')).settings;
+  } else if(r==='users'){
+    state.users=(await api('/api/users')).users;
+  } else if(r==='connectors'){
+    state.connectors=(await api('/api/connectors')).connectors;
+    state.automation=(await api('/api/automation')).automation;
+  } else if(r==='lead'){
+    state.currentLead=(await api('/api/leads/'+state.params.id)).lead;
+  }
+}
+async function go(route,params){ state.route=route; state.params=params||{}; window.scrollTo(0,0);
+  try{ await loadRouteData(); }catch(e){ return; } render(); }
+async function refresh(){ try{ await loadRouteData(); }catch(e){ return; } render(); }
+
+async function doLogin(pin){
+  let r; try{ r=await api('/api/login','POST',{pin}); }catch(e){ state.loginErr='Server se connect nahi ho paya'; state.pin=''; render(); return; }
+  if(r.error){ state.loginErr=r.error+'. Dubara try karo.'; state.pin=''; render(); return; }
+  state.token=r.token; state.user=r.user;
+  const me=await api('/api/me'); setCfg(me.config);
+  state.users=(await api('/api/users')).users;
+  state.route='dashboard'; state.pin=''; state.loginErr='';
+  await loadRouteData(); render();
+}
+function logout(){ state.token=null; state.user=null; state.pin=''; state.route='dashboard'; render(); }
+
+/* ============================================================ RENDER ============================================================ */
+const root=()=>document.getElementById('root');
+function render(){
+  if(!state.user){ root().innerHTML=renderLogin(); return; }
+  root().innerHTML=renderShell(pageContent());
+  if(state.toastMsg){ showToast(state.toastMsg); state.toastMsg=''; }
+}
+
+function renderLogin(){
+  const dots=[0,1,2,3].map(i=>`<div class="pin-dot ${i<state.pin.length?'on':''}"></div>`).join('');
+  const keys=[1,2,3,4,5,6,7,8,9].map(n=>`<button class="key" data-key="${n}">${n}</button>`).join('');
+  const opts=DEMO.map(d=>`<option value="${d[2]}">${d[1]} (PIN ${d[2]})</option>`).join('');
+  return `<div class="login-wrap"><div class="login-card">
+    <div class="brand"><div class="logo">M<b>H</b>S</div><h1>MHS CRM</h1></div>
+    <div class="sub">Lead Management • Sales • Reports</div>
+    <div style="font-weight:700;margin-bottom:4px">Enter your PIN</div>
+    <div class="pin-display">${dots}</div>
+    <div class="keypad">${keys}
+      <button class="key fn" data-key="clear">Clear</button>
+      <button class="key" data-key="0">0</button>
+      <button class="key fn" data-key="back">⌫</button></div>
+    <div class="login-err">${state.loginErr||''}</div>
+    <div class="demo-box"><div class="t">Demo — quick login</div>
+      <select class="demo-sel" id="demoSel"><option value="">Choose a user…</option>${opts}</select></div>
+  </div></div>`;
+}
+
+function navItems(){
+  const r=state.user.role;
+  if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['settings','Settings','⚙️']];
+  if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰']];
+  return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰']];
+}
+function renderShell(inner){
+  const u=state.user;
+  const roleLabel=u.role==='admin'?'Admin':u.role==='lead'?'Team Lead • '+teamCode(u.team):'Sales • '+teamCode(u.team);
+  const nav=navItems();
+  const top=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}">${n[1]}</a>`).join('');
+  const bot=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}"><span class="bi">${n[2]}</span>${n[1]}</a>`).join('');
+  const addBtn=(u.role!=='lead')?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
+  return `<div class="app">
+    <div class="topbar"><div class="logo">M<b>H</b>S</div><div class="topnav">${top}</div><div class="spacer"></div>
+      ${addBtn}
+      <div class="userchip"><div class="avatar">${initials(u.name)}</div>
+        <div><div class="nm">${esc(u.name)}</div><div class="rl">${roleLabel}</div></div></div>
+      <button class="btn ghost sm" data-action="logout">Logout</button>
+    </div>
+    <div class="content">${inner}</div>
+    <div class="botnav">${bot}</div></div>`;
+}
+function pageContent(){
+  switch(state.route){
+    case 'dashboard': return renderDashboard();
+    case 'leads': return renderLeads(false);
+    case 'myleads': return renderLeads(true);
+    case 'followups': return renderFollowups();
+    case 'users': return renderUsers();
+    case 'connectors': return renderConnectors();
+    case 'settings': return renderSettings();
+    case 'lead': return renderLeadDetail();
+    default: return renderDashboard();
+  }
+}
+
+function setCfg(c){ state.cfg=c; state.cfg.sourcesMap=Object.fromEntries((c.sources||[]).map(s=>[s.name,{c:s.color,i:s.icon}])); }
+function srcMeta(s){ const m=state.cfg&&state.cfg.sourcesMap&&state.cfg.sourcesMap[s]; return m||SOURCES[s]||{c:'#6b7488',i:String(s||'?').slice(0,2)}; }
+function srcList(){ return (state.cfg&&state.cfg.sources)?state.cfg.sources.map(x=>x.name):Object.keys(SOURCES); }
+function badge(s){const x=STATUS[s]||{cls:'b-junk',dot:'#888'};return `<span class="badge ${x.cls}"><span class="dot" style="background:${x.dot}"></span>${esc(s)}</span>`;}
+function srcChip(s){const m=srcMeta(s);return `<span class="src"><span class="si" style="background:${m.c}">${m.i}</span>${esc(s)}</span>`;}
+
+/* ---------------- DASHBOARD ---------------- */
+function targetCard(title,leadsN,intN,closeN,tgt){
+  const bar=(lbl,n,t,c)=>{const p=Math.min(100,Math.round(n/t*100));
+    return `<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;margin-bottom:4px">
+      <span>${lbl}</span><span style="color:${p>=100?'#12a150':'var(--muted)'}">${n}/${t} ${p>=100?'✓':''}</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${p}%;background:${c}"></div></div></div>`;};
+  return `<div class="panel"><div class="panel-h">${title}<span style="font-size:11px;color:var(--muted);font-weight:600">Target</span></div>
+    <div class="panel-b">${bar('Leads',leadsN,tgt.leads,'#2d5be3')}${bar('Interested',intN,tgt.interested,'#f5a623')}${bar('Closed Won',closeN,tgt.closed,'#12a150')}</div></div>`;
+}
+function todayCallCard(l){const over=isOverdue(l.next_followup);
+  return `<div class="lcard" data-lead="${l.id}">
+    <div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)} • ${esc(l.product)}</div></div>${badge(l.status)}</div>
+    <div class="row"><span class="meta ${over?'overdue':''}">⏰ ${fmtDate(l.next_followup)}${over?' (overdue)':' (today)'}</span>${srcChip(l.source)}</div>
+    <div class="acts"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>
+      <button class="btn ghost" data-action="wa" data-lead="${l.id}">WhatsApp</button>
+      <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
+}
+function funnelHTML(funnel){
+  const maxF=Math.max(1,...funnel.map(f=>f.n));
+  return funnel.map(f=>`<div class="fr"><div class="lb">${f.st}</div><div class="fb" style="width:${Math.max(10,f.n/maxF*100)}%;background:${(STATUS[f.st]||{}).dot||'#888'}">${f.n}</div></div>`).join('');
+}
+function sourceBars(bySource){
+  const arr=bySource.slice().sort((a,b)=>b.n-a.n); const max=Math.max(1,...arr.map(x=>x.n));
+  return arr.map(x=>{const m=srcMeta(x.src);
+    return `<div class="bar-row"><div class="nm"><span class="src"><span class="si" style="background:${m.c}">${m.i}</span>${esc(x.src)}</span></div>
+    <div class="bar-track"><div class="bar-fill" style="width:${x.n/max*100}%;background:${m.c}"></div></div><div class="n">${x.n}</div></div>`;}).join('');
+}
+function renderDashboard(){
+  const sm=state.reports.summary||{total:0,won:0,open:0,interested:0,conv:0,bySource:[],funnel:[]};
+  const kpis=`<div class="kpis">
+    <div class="kpi"><div class="lbl">Total Leads</div><div class="val b">${sm.total}</div><div class="sub">${state.user.role==='sales'?'assigned to you':'all sources'}</div></div>
+    <div class="kpi"><div class="lbl">Open</div><div class="val o">${sm.open}</div><div class="sub">need action</div></div>
+    <div class="kpi"><div class="lbl">Closed Won</div><div class="val g">${sm.won}</div><div class="sub">converted</div></div>
+    <div class="kpi"><div class="lbl">Conversion</div><div class="val">${sm.conv}%</div><div class="sub">won / total</div></div></div>`;
+
+  if(state.user.role==='sales'){
+    const openLs=state.leads.filter(l=>l.next_followup && STATUS[l.status]?.open);
+    const todayLs=openLs.filter(l=>isOverdue(l.next_followup)||isToday(l.next_followup)).sort((a,b)=>parseD(a.next_followup)-parseD(b.next_followup));
+    const first=esc(state.user.name.split(' ')[0]);
+    const list=todayLs.length?`<div class="cards" style="display:flex">${todayLs.map(todayCallCard).join('')}</div>`
+      :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 Aaj ke saare calls done!</div></div>`;
+    return `<div class="page-h"><h2>Namaste, ${first} 👋</h2></div>
+      <div class="panel" style="margin-bottom:16px;border:2px solid #ffe0c2">
+        <div class="panel-h" style="color:var(--orange)">📞 Aaj call karni hai — ${todayLs.length} leads<span class="badge b-rnr">Priority</span></div>
+        <div class="panel-b">${list}</div></div>
+      ${kpis}
+      <div class="grid2">${targetCard('Mera Target (month)',sm.total,sm.interested,sm.won,CFG().agentTarget||{leads:20,interested:6,closed:2})}
+        <div class="panel"><div class="panel-h">My Funnel</div><div class="panel-b funnel">${funnelHTML(sm.funnel)}</div></div></div>`;
+  }
+
+  // admin / lead
+  const activity=state.reports.activity||[];
+  const offenders=activity.filter(a=>a.junk>=3).sort((a,b)=>b.junk-a.junk);
+  let junkAlert='';
+  if(offenders.length) junkAlert=`<div class="panel" style="border:2px solid #ffd0cf;background:#fff7f7;margin-bottom:16px">
+    <div class="panel-b" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-size:22px">⚠️</span>
+    <div style="flex:1"><b style="color:var(--red)">Junk alert:</b> ${offenders.map(x=>`${esc(x.name)} ne <b>${x.junk}</b> leads Junk maari`).join(' • ')}.
+    <span class="lead-sub">Inke leads review karo.</span></div></div></div>`;
+
+  const agents=state.reports.agents||[];
+  const teamAgg={}; agents.forEach(a=>{const t=teamAgg[a.team]=teamAgg[a.team]||{leads:0,interested:0,closed:0};
+    t.leads+=a.total; t.interested+=a.counts['Interested']||0; t.closed+=a.counts['Closed Won']||0;});
+  const teamKeys=state.user.role==='admin'?Object.keys(CFG().teams):[state.user.team];
+  const at=CFG().agentTarget||{leads:200,interested:60,closed:20};
+  const teamCards=teamKeys.map(tk=>{const t=teamAgg[tk]||{leads:0,interested:0,closed:0};
+    const heads=Math.max(1,salesUsers().filter(u=>u.team===tk).length);
+    const tgt={leads:at.leads*heads,interested:at.interested*heads,closed:at.closed*heads};
+    return targetCard(teamName(tk)+' <span class="lead-sub">('+heads+' agents)</span>',t.leads,t.interested,t.closed,tgt);}).join('');
+
+  const actRows=activity.map(a=>{const respFlag=a.avgRespMin>=5?'style="color:var(--red);font-weight:700"':'';
+    return `<tr data-owner="${a.id}"><td><div style="display:flex;align-items:center;gap:8px">
+      <span class="dot" style="background:${a.working?'#12a150':'#c4c9d4'}"></span>
+      <div><div class="lead-nm">${esc(a.name)}</div><div class="lead-sub">${teamCode(a.team)}</div></div></div></td>
+      <td>${a.working?'<span class="badge b-interested">Working</span>':'<span class="badge b-junk">Idle</span>'}</td>
+      <td class="num">${a.callsToday}</td>
+      <td class="num">${fmtDur(a.talktime)}</td>
+      <td class="num" ${respFlag}>${a.avgRespMin!=null?a.avgRespMin+' min':'—'}</td>
+      <td class="num" ${a.junk>=3?'style="color:var(--red);font-weight:700"':''}>${a.junk}</td></tr>`;}).join('');
+  const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — kaun kaam kar raha hai
+    <span class="lead-sub">calls = connected only • avg response = lead aane se pehli call tak</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th>Status</th><th style="text-align:right">Calls today</th><th style="text-align:right">Talk time</th><th style="text-align:right">Avg response</th><th style="text-align:right">Junk</th></tr></thead>
+    <tbody>${actRows}</tbody></table></div></div>`;
+
+  // agent report (grouped by team)
+  const cols=['Fresh','Follow Up','Interested','Not Interested','Closed Won'];
+  const sorted=agents.slice().sort((a,b)=>a.team.localeCompare(b.team)||a.name.localeCompare(b.name));
+  let rows='',lastTeam='';
+  sorted.forEach(u=>{const cells=cols.map(c=>`<td class="num">${u.counts[c]||'<span style="color:#c4c9d4">0</span>'}</td>`).join('');
+    const teamCell=u.team!==lastTeam?`<td class="grp-td">${teamName(u.team)}</td>`:'<td></td>'; lastTeam=u.team;
+    rows+=`<tr data-owner="${u.id}">${teamCell}<td><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></td>
+      <td class="num" style="font-weight:800">${u.total}</td>${cells}</tr>`;});
+  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Team</th><th>Owner</th><th style="text-align:right">Total</th>
+    ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
+
+  const title=state.user.role==='lead'?'Team Report — '+teamName(state.user.team):'Admin Dashboard';
+  const df=state.dateFilter;
+  const dateBar=`<div class="filters"><span class="lead-sub" style="font-weight:700">📅 Date range:</span>
+    <input type="date" id="dfrom" value="${esc(df.from)}"> <span>→</span> <input type="date" id="dto" value="${esc(df.to)}">
+    <button class="btn sm" data-action="applydate">Apply</button>${(df.from||df.to)?' <button class="btn ghost sm" data-action="cleardate">Clear</button>':''}</div>`;
+  return `<div class="page-h"><h2>${title}</h2></div>${dateBar}${junkAlert}${kpis}
+    <div class="page-h" style="margin-top:6px"><h2 style="font-size:15px">🎯 Targets</h2></div>
+    <div class="kpis">${teamCards}</div>${activityPanel}
+    <div class="grid2" style="margin-top:16px">
+      <div class="panel"><div class="panel-h">Leads by Source</div><div class="panel-b">${sourceBars(sm.bySource)}</div></div>
+      <div class="panel"><div class="panel-h">Sales Funnel</div><div class="panel-b funnel">${funnelHTML(sm.funnel)}</div></div></div>
+    ${agentPanel}`;
+}
+
+/* ---------------- LEAD LIST ---------------- */
+function filterBar(showOwner){
+  const f=state.filters;
+  const stOpt=STATUS_LIST.map(s=>`<option ${f.status===s?'selected':''}>${s}</option>`).join('');
+  const srOpt=srcList().map(s=>`<option ${f.source===s?'selected':''}>${s}</option>`).join('');
+  const owOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
+  return `<div class="filters">
+    <input class="search" id="fq" placeholder="🔍  Search name, phone, city…" value="${esc(f.q)}">
+    <select id="fstatus"><option value="">All Status</option>${stOpt}</select>
+    <select id="fsource"><option value="">All Sources</option>${srOpt}</select>
+    ${showOwner?`<select id="fowner"><option value="">All Owners</option>${owOpt}</select>`:''}</div>`;
+}
+function renderLeads(mineOnly){
+  const showOwner=state.user.role!=='sales';
+  const ls=state.leads.slice().sort((a,b)=>(STATUS[b.status]?.open-STATUS[a.status]?.open)||(parseD(b.created_at)-parseD(a.created_at)));
+  const title=mineOnly?'My Leads':state.user.role==='lead'?'Team Leads':'All Leads';
+  const rows=ls.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
+    return `<tr data-lead="${l.id}"><td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
+      <td>${srcChip(l.source)}</td><td><span class="pill">${esc(l.product)}</span></td><td>${badge(l.status)}</td>
+      <td>${showOwner?esc(l.owner_name):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
+  const table=`<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
+    <th>${showOwner?'Owner':'Follow-up'}</th>${showOwner?'<th>Follow-up</th>':''}</tr></thead>
+    <tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
+  const cards=ls.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
+    return `<div class="lcard" data-lead="${l.id}"><div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div>${badge(l.status)}</div>
+      <div class="row">${srcChip(l.source)}<span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
+      <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
+        <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
+        <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
+        <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
+  return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span></div>
+    ${filterBar(showOwner)}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
+}
+
+/* ---------------- FOLLOW-UPS ---------------- */
+function renderFollowups(){
+  const ls=state.leads.filter(l=>l.next_followup && STATUS[l.status]?.open).sort((a,b)=>parseD(a.next_followup)-parseD(b.next_followup));
+  const overdue=ls.filter(l=>isOverdue(l.next_followup)), today=ls.filter(l=>isToday(l.next_followup)), up=ls.filter(l=>!isOverdue(l.next_followup)&&!isToday(l.next_followup));
+  const showOwner=state.user.role!=='sales';
+  const card=l=>`<div class="lcard" data-lead="${l.id}"><div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)} • ${esc(l.product)}</div></div>${badge(l.status)}</div>
+    <div class="row"><span class="meta ${isOverdue(l.next_followup)?'overdue':''}">⏰ ${fmtDate(l.next_followup)}</span>${srcChip(l.source)}${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}</div>
+    <div class="acts"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>
+      <button class="btn ghost" data-action="wa" data-lead="${l.id}">WhatsApp</button>
+      <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
+  const sec=(t,arr,c)=>arr.length?`<div class="page-h" style="margin-top:18px"><h2 style="font-size:16px;color:${c}">${t}</h2><span class="cnt">${arr.length}</span></div><div class="cards" style="display:flex">${arr.map(card).join('')}</div>`:'';
+  const empty=ls.length?'':'<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">🎉 No pending follow-ups.</div></div>';
+  let missedPanel='';
+  if(state.user.role!=='sales' && state.reports.followups){
+    const {per,teams}=state.reports.followups;
+    const teamRows=teams.map(t=>`<tr><td><span class="pill">${teamCode(t.team)}</span> ${teamName(t.team)}</td><td class="num ${t.missed>0?'overdue':''}">${t.missed}</td><td class="num">${t.todayDue}</td></tr>`).join('')||'<tr><td colspan="3" style="text-align:center;color:var(--muted)">—</td></tr>';
+    const userRows=per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
+    missedPanel=`<div class="grid2" style="margin-bottom:16px">
+      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — Department wise</div><div style="overflow-x:auto"><table><thead><tr><th>Department / Team</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${teamRows}</tbody></table></div></div>
+      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — User wise</div><div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${userRows}</tbody></table></div></div></div>`;
+  }
+  return `<div class="page-h"><h2>Follow-ups</h2><span class="cnt">${ls.length} pending</span></div>${missedPanel}${empty}
+    ${sec('🔴 Overdue',overdue,'#e5484d')}${sec('🟠 Today',today,'#c77700')}${sec('🔵 Upcoming',up,'#1971c2')}`;
+}
+
+/* ---------------- USERS ---------------- */
+function renderUsers(){
+  const roleB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
+  const rows=state.users.map(u=>`<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="avatar">${initials(u.name)}</div>
+    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></div></div></td>
+    <td>${roleB(u.role)}</td><td>${u.team==='-'?'—':`<span class="pill">${teamName(u.team)}</span>`}</td>
+    <td class="num">${u.role==='sales'?u.leads:'—'}</td></tr>`).join('');
+  const cards=state.users.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
+    <div class="avatar">${initials(u.name)}</div><div><div class="nm" style="font-size:14px">${esc(u.name)}</div>
+    <div class="meta">${u.team==='-'?'':teamName(u.team)}</div></div></div>${roleB(u.role)}</div></div>`).join('');
+  return `<div class="page-h"><h2>Team</h2><span class="cnt">${state.users.length} users</span><div class="spacer"></div>
+    <button class="btn" data-action="adduser">+ Add User</button></div>
+    <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Team / Product</th><th style="text-align:right">Leads</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="cards">${cards}</div>`;
+}
+
+/* ---------------- CONNECTORS ---------------- */
+function renderConnectors(){
+  const cards=state.connectors.map(c=>`<div class="panel"><div class="panel-b"><div style="display:flex;align-items:flex-start;gap:12px">
+    <span class="si" style="width:40px;height:40px;border-radius:11px;font-size:15px;background:${c.color}">${c.icon}</span>
+    <div style="flex:1"><div style="font-weight:800">${c.name}</div><div class="lead-sub">${c.descr}</div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${c.connected?'<span class="badge b-interested">● Connected</span>':'<span class="badge b-junk">○ Not connected</span>'}
+        <span class="pill">→ ${teamName(c.team)}</span><span class="lead-sub">${c.leads} leads</span></div></div>
+    <button class="btn ${c.connected?'ghost':''} sm" data-action="toggleconn" data-ckey="${c.key}" data-val="${c.connected?0:1}">${c.connected?'Disconnect':'Connect'}</button>
+    </div></div></div>`).join('');
+  const au=state.automation;
+  const tog=(k,lbl,desc)=>`<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)">
+    <div style="flex:1"><div style="font-weight:700">${lbl}</div><div class="lead-sub">${desc}</div></div>
+    <button class="btn ${au[k]?'':'ghost'} sm" data-action="toggleauto" data-akey="${k}" data-val="${au[k]?0:1}">${au[k]?'ON':'OFF'}</button></div>`;
+  const routeRows=Object.keys(CFG().teams).map(tk=>{const ags=salesUsers().filter(u=>u.team===tk).map(u=>u.name).join(', ')||'—';
+    const srcs=state.connectors.filter(c=>c.team===tk&&c.connected).map(c=>c.key).join(', ')||'—';
+    return `<tr><td><span class="pill">${tk}</span> ${teamName(tk)}</td><td>${srcs}</td><td class="lead-sub">${ags}</td></tr>`;}).join('');
+  return `<div class="page-h"><h2>Sources & Automation</h2></div>
+    <div class="page-h" style="margin-top:4px"><h2 style="font-size:15px">🔌 Lead Connectors</h2><span class="cnt">jahan se lead aata hai</span></div>
+    <div class="grid2">${cards}</div>
+    <div class="grid2" style="margin-top:8px">
+      <div class="panel"><div class="panel-h">⚙️ Automation Rules</div><div class="panel-b" style="padding-top:2px">
+        ${tog('roundRobin','Round-robin auto-assign','Naya lead aate hi agents ko bari-bari auto assign')}
+        ${tog('autoWaOnMiss','Missed call → Auto WhatsApp','No-answer par auto WhatsApp')}
+        ${tog('autoRnrOnMiss','Missed call → Auto RNR','No-answer par lead RNR + reminder')}
+        ${tog('autoFollowup','Auto follow-up reminder','Open lead close na ho jab tak')}
+      </div></div>
+      <div class="panel"><div class="panel-h">🎯 Routing — Product / Team<button class="btn sm" data-action="addproduct">+ Add Product</button></div>
+        <div style="overflow-x:auto"><table><thead><tr><th>Product / Team</th><th>Sources</th><th>Round-robin agents</th></tr></thead>
+        <tbody>${routeRows}</tbody></table></div></div></div>`;
+}
+
+/* ---------------- SETTINGS (Admin) ---------------- */
+function renderSettings(){
+  const s=state.settings||{}; const t={leads:s.target_leads||200,interested:s.target_interested||60,closed:s.target_closed||20};
+  const srcRows=(CFG().sources||[]).map(x=>`<span class="src" style="margin:4px 8px 4px 0"><span class="si" style="background:${x.color}">${x.icon}</span>${esc(x.name)}</span>`).join('');
+  return `<div class="page-h"><h2>Settings</h2></div>
+    <div class="grid2">
+      <div class="panel"><div class="panel-h">🎯 Targets — per agent / vertical</div><div class="panel-b">
+        <div class="field"><label>Leads target</label><input id="st_leads" type="number" value="${t.leads}"></div>
+        <div class="field"><label>Interested target</label><input id="st_int" type="number" value="${t.interested}"></div>
+        <div class="field"><label>Closed Won target</label><input id="st_closed" type="number" value="${t.closed}"></div>
+        <button class="btn block" data-action="savesettings">Save targets</button></div></div>
+      <div class="panel"><div class="panel-h">📥 Lead Sources<button class="btn sm" data-action="addsource">+ Add Source</button></div>
+        <div class="panel-b"><div style="display:flex;flex-wrap:wrap">${srcRows}</div>
+        <div class="lead-sub" style="margin-top:10px">Naya source add karo (Instagram, Justdial, etc.) — lead form + reports me aa jaayega.</div></div></div>
+    </div>
+    <div class="panel" style="margin-top:16px"><div class="panel-h">Quick actions</div><div class="panel-b" style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn ghost" data-action="adduser">👥 Add User</button>
+      <button class="btn ghost" data-nav="users">Manage Team</button>
+      <button class="btn ghost" data-nav="connectors">🔌 Connectors & Automation</button>
+      <button class="btn ghost" data-action="addproduct">➕ Add Product / Team</button>
+    </div></div>`;
+}
+function addSourceModal(){
+  openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Lead Source</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Source name</label><input id="ns_name" placeholder="e.g. Instagram / Justdial"></div>
+      <div class="field"><label>Short icon (1–2 letters)</label><input id="ns_icon" maxlength="2" placeholder="Ig"></div>
+      <div class="field"><label>Colour</label><input id="ns_color" type="color" value="#2d5be3" style="height:44px;padding:4px"></div>
+      <button class="btn block" data-action="savesource">Add Source</button></div></div>`);
+}
+
+/* ---------------- LEAD DETAIL ---------------- */
+function renderLeadDetail(){
+  const l=state.currentLead; if(!l) return renderLeads(false);
+  const tier=scoreTier(l.score);
+  const stOpt=STATUS_LIST.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
+  const ownOpt=salesUsers().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${u.name}</option>`).join('');
+  const fuVal=l.next_followup||'';
+  const canReassign=state.user.role!=='sales';
+  const timeline=(l.activities||[]).slice().reverse().map(a=>`<li><div class="tt">${esc(a.title)}</div>
+    <div class="tm">${fmtDateTime(a.created_at)} • ${esc(a.by_name)}${a.sub?' • '+esc(a.sub):''}</div></li>`).join('');
+  const wonBadge=l.converted?`<span class="convo">✓ Customer CRM me push ho gaya</span>`:'';
+  return `<div class="page-h"><a data-nav="back" style="font-weight:700">← Back</a></div>
+  <div class="ld-head"><div class="r1"><div class="ld-avatar">${initials(l.name)}</div>
+    <div style="flex:1"><h2>${esc(l.name)}</h2>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        ${badge(l.status)} ${srcChip(l.source)} <span class="pill">${teamName(l.product)}</span>
+        <span class="badge" style="background:${tier.c}20;color:${tier.c}">${tier.t} • score ${l.score}</span>${wonBadge}</div></div></div>
+    <div class="ld-contact"><span>📞 <b>${esc(l.phone)}</b></span><span>✉️ <b>${esc(l.email)}</b></span><span>📍 <b>${esc(l.city)}</b></span>
+      <span>🌐 <b>${esc(l.website||'—')}</b></span><span>👤 Owner: <b>${esc(l.owner_name)}</b></span><span>🗓️ Created: <b>${fmtDate(l.created_at)}</b></span></div>
+    <div class="ld-actions"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call now</button>
+      <button class="btn ghost" data-action="miss" data-lead="${l.id}">📵 No answer (auto WA + RNR)</button>
+      <button class="btn" style="background:#25d366" data-action="wa" data-lead="${l.id}">🟢 WhatsApp</button>
+      <button class="btn" style="background:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️ Email</button></div></div>
+  <div class="grid2">
+    <div class="panel"><div class="panel-h">Update</div><div class="panel-b">
+      <div class="field"><label>Status</label><select data-action="setstatus" data-lead="${l.id}">${stOpt}</select></div>
+      <div class="field"><label>Next follow-up (reminder)</label><input type="date" value="${fuVal}" data-action="setfollow" data-lead="${l.id}"></div>
+      ${canReassign?`<div class="field"><label>Assign to (owner)</label><select data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
+      <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Call ka summary likho…"></textarea></div>
+      <button class="btn block" data-action="addnote" data-lead="${l.id}">Save note</button></div></div>
+    <div class="panel"><div class="panel-h">Activity Timeline</div><div class="panel-b"><ul class="timeline">${timeline}</ul></div></div></div>`;
+}
+
+/* ---------------- toast / modal ---------------- */
+function showToast(msg){const t=document.createElement('div');t.className='toast';t.innerHTML=`<span class="ok">✓</span> ${msg}`;document.body.appendChild(t);setTimeout(()=>t.remove(),3200);}
+function openModal(html){const bg=document.createElement('div');bg.className='modal-bg';bg.id='modalBg';bg.innerHTML=html;document.body.appendChild(bg);bg.addEventListener('click',e=>{if(e.target===bg)closeModal();});}
+function closeModal(){const m=document.getElementById('modalBg');if(m)m.remove();}
+
+function addLeadModal(){
+  const owOpt='<option value="auto">⚡ Auto — Round Robin (recommended)</option>'+salesUsers().map(u=>`<option value="${u.id}">${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
+  const srOpt=srcList().map(s=>`<option>${s}</option>`).join('');
+  const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>+ Add New Lead</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Name</label><input id="nl_name" placeholder="Customer ka naam"></div>
+      <div class="field"><label>Phone</label><input id="nl_phone" placeholder="+91 …"></div>
+      <div class="field"><label>Email</label><input id="nl_email"></div>
+      <div class="field"><label>City</label><input id="nl_city"></div>
+      <div class="field"><label>Product</label><select id="nl_product">${prOpt}</select></div>
+      <div class="field"><label>Source</label><select id="nl_source">${srOpt}</select></div>
+      <div class="field"><label>Assign to</label><select id="nl_owner">${owOpt}</select></div>
+      <button class="btn block" data-action="savelead">Add Lead</button></div></div>`);
+}
+function addProductModal(){
+  openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Product / Team</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Short code (2–5 letters)</label><input id="np_code" maxlength="5" placeholder="e.g. TPX" style="text-transform:uppercase"></div>
+      <div class="field"><label>Full name</label><input id="np_name" placeholder="e.g. The Powerful X"></div>
+      <div class="field"><label>Colour</label><input id="np_color" type="color" value="#2d5be3" style="height:44px;padding:4px"></div>
+      <div class="lead-sub" style="margin-bottom:12px">Add karne ke baad ye product lead form, routing, aur reports sab jagah dikhega. Iske liye agents assign karne ke liye Team me jaake unka product badlo.</div>
+      <button class="btn block" data-action="saveproduct">Add Product</button></div></div>`);
+}
+function addUserModal(){
+  const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}">${teamName(k)}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Team Member</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Name</label><input id="nu_name"></div>
+      <div class="field"><label>Email</label><input id="nu_email"></div>
+      <div class="field"><label>Phone</label><input id="nu_phone" placeholder="+91 …"></div>
+      <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Team Lead</option><option value="admin">Admin</option></select></div>
+      <div class="field"><label>Team / Product</label><select id="nu_team">${teamOpt}</select></div>
+      <div class="field"><label>Department</label><input id="nu_dept" placeholder="e.g. Pre Sales / TFD Sales"></div>
+      <div class="field"><label>Login PIN (4 digit)</label><input id="nu_pin" maxlength="4" placeholder="e.g. 4321"></div>
+      <button class="btn block" data-action="saveuser">Add Member</button></div></div>`);
+}
+
+/* ============================================================ EVENTS ============================================================ */
+const gv=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
+
+document.addEventListener('click',async function(e){
+  const key=e.target.closest('[data-key]');
+  if(key && !state.user){ const k=key.dataset.key;
+    if(k==='back') state.pin=state.pin.slice(0,-1); else if(k==='clear') state.pin=''; else if(state.pin.length<4) state.pin+=k;
+    state.loginErr=''; if(state.pin.length===4){ const pin=state.pin; render(); return doLogin(pin); } render(); return; }
+
+  const nav=e.target.closest('[data-nav]');
+  if(nav){ const r=nav.dataset.nav; if(r==='back'){ return go(state.user.role==='sales'?'myleads':'leads'); } return go(r); }
+
+  const act=e.target.closest('[data-action]');
+  if(act){ const a=act.dataset.action, id=act.dataset.lead;
+    if(a==='logout'){ if(confirm('Logout karna hai?')) logout(); return; }
+    if(a==='addlead'){ return addLeadModal(); }
+    if(a==='adduser'){ return addUserModal(); }
+    if(a==='addproduct'){ return addProductModal(); }
+    if(a==='saveproduct'){
+      const code=gv('np_code'), name=gv('np_name'); if(!code||!name){alert('Code aur naam daalo');return;}
+      const r=await api('/api/teams','POST',{code,name,color:document.getElementById('np_color').value});
+      if(r.error){alert(r.error);return;}
+      const me=await api('/api/me'); setCfg(me.config); closeModal();
+      state.toastMsg='Product add ho gaya: '+r.code; return refresh();
+    }
+    if(a==='addsource'){ return addSourceModal(); }
+    if(a==='savesource'){ const name=gv('ns_name'); if(!name){alert('Naam daalo');return;}
+      await api('/api/sources','POST',{name,icon:gv('ns_icon')||name.slice(0,2),color:document.getElementById('ns_color').value});
+      const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source add ho gaya: '+name; return refresh(); }
+    if(a==='savesettings'){ await api('/api/settings','PATCH',{target_leads:+gv('st_leads'),target_interested:+gv('st_int'),target_closed:+gv('st_closed')});
+      const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets save ho gaye ✓'; return refresh(); }
+    if(a==='applydate'){ state.dateFilter={from:gv('dfrom'),to:gv('dto')}; return refresh(); }
+    if(a==='cleardate'){ state.dateFilter={from:'',to:''}; return refresh(); }
+    if(a==='email'){ await api('/api/leads/'+id+'/email','POST',{}); const mail=act.dataset.mail; if(mail&&mail!=='-'&&mail!=='—'&&mail.includes('@')){try{window.open('mailto:'+mail);}catch(_){}} state.toastMsg='✉️ Email compose/sent (email setup ke baad real jaayega)'; return refresh(); }
+    if(a==='closemodal'){ return closeModal(); }
+    if(a==='savelead'){
+      const name=gv('nl_name'); if(!name){alert('Naam daalo');return;}
+      const body={name,phone:gv('nl_phone'),email:gv('nl_email'),city:gv('nl_city'),
+        product:document.getElementById('nl_product').value,source:document.getElementById('nl_source').value,
+        owner_id:document.getElementById('nl_owner').value};
+      const r=await api('/api/leads','POST',body); closeModal();
+      state.toastMsg='Lead add ho gaya → '+r.lead.owner_name; return refresh();
+    }
+    if(a==='saveuser'){
+      const name=gv('nu_name'); if(!name){alert('Naam daalo');return;}
+      const pin=gv('nu_pin')||'0000';
+      await api('/api/users','POST',{name,email:gv('nu_email'),phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),pin});
+      closeModal(); state.toastMsg=name+' add ho gaya. PIN: '+pin; if(state.route==='users') return refresh(); return; }
+    if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
+    if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
+    if(a==='call'){ await api('/api/leads/'+id+'/call','POST',{}); state.toastMsg='📞 Call ho rahi hai… (recording on, location logged)'; return refresh(); }
+    if(a==='wa'){ await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='WhatsApp bheja/khula'; return refresh(); }
+    if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 Miss → '+(r.steps||[]).join(' + ')+'. Lead close nahi hui.'; return refresh(); }
+    if(a==='addnote'){ const v=gv('noteBox'); if(v){ await api('/api/leads/'+id+'/activity','POST',{title:'📝 Note',sub:v}); state.toastMsg='Note save ho gaya'; return refresh(); } return; }
+    return;
+  }
+  const lead=e.target.closest('[data-lead]');
+  if(lead && !e.target.closest('[data-action]')){ return go('lead',{id:lead.dataset.lead}); }
+});
+
+document.addEventListener('change',async function(e){
+  const el=e.target;
+  if(el.id==='demoSel'){ if(el.value){ const pin=el.value; state.pin=pin; render(); return doLogin(pin); } return; }
+  const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
+  if(a==='setstatus'){ await api('/api/leads/'+id,'PATCH',{status:el.value}); state.toastMsg=(STATUS[el.value]?.won?'🎉 WON! Customer CRM me push ho gaya.':'Status updated'); return refresh(); }
+  if(a==='setfollow'){ await api('/api/leads/'+id,'PATCH',{next_followup:el.value||null}); state.toastMsg='Reminder set ho gaya'; return refresh(); }
+  if(a==='setowner'){ await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassign ho gaya'; return refresh(); }
+  if(el.id==='fstatus'){ state.filters.status=el.value; return refresh(); }
+  if(el.id==='fsource'){ state.filters.source=el.value; return refresh(); }
+  if(el.id==='fowner'){ state.filters.owner=el.value; return refresh(); }
+});
+
+let searchTimer=null;
+document.addEventListener('input',function(e){
+  if(e.target.id==='fq'){ state.filters.q=e.target.value; clearTimeout(searchTimer);
+    searchTimer=setTimeout(async()=>{ const box=document.getElementById('fq'); const pos=box?box.selectionStart:null;
+      await refresh(); const nb=document.getElementById('fq'); if(nb){ nb.focus(); if(pos!=null){try{nb.setSelectionRange(pos,pos);}catch(_){}} } },250); }
+});
+
+/* boot */
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "mhs-crm-server",
+  "version": "1.0.0",
+  "description": "MHS CRM — live backend (leads, webhooks, round-robin, reports). Zero external dependencies — Node 22+ builtins only.",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js reset"
+  }
+}
