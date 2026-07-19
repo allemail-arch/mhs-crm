@@ -168,6 +168,7 @@
   }
   @media(min-width:721px){ .mobile-only{display:none !important} }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -471,7 +472,8 @@ function renderLeads(mineOnly){
         <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
         <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
-  return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span></div>
+  const importBtn = state.user.role!=='sales' ? `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>` : '';
+  return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
     ${filterBar(showOwner)}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
 }
 
@@ -569,6 +571,58 @@ function renderSettings(){
       <button class="btn ghost" data-nav="connectors">🔌 Connectors & Automation</button>
       <button class="btn ghost" data-action="addproduct">➕ Add Product / Team</button>
     </div></div>`;
+}
+/* ---------------- BULK IMPORT (Excel/CSV) ---------------- */
+let IMPORT_ROWS=[];
+function importModal(){
+  IMPORT_ROWS=[];
+  openModal(`<div class="modal"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">File me columns (kisi bhi order me): <b>Name, Phone, Email, City, Product, Source</b>. Sirf <b>Name</b> zaroori hai. Har lead round-robin se agents ko <b>auto-assign</b> hoga.</div>
+      <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="margin-bottom:12px;width:100%">
+      <div id="importInfo" class="lead-sub" style="min-height:18px;margin-bottom:10px"></div>
+      <button class="btn block" data-action="doimport" id="doImportBtn" disabled style="opacity:.5">Import karo</button>
+      <div style="margin-top:10px;text-align:center"><button class="btn ghost sm" data-action="samplecsv">↓ Sample CSV download</button></div>
+    </div></div>`);
+}
+function splitCsv(line){ const out=[]; let cur='',q=false;
+  for(let i=0;i<line.length;i++){ const c=line[i];
+    if(c==='"'){ if(q&&line[i+1]==='"'){cur+='"';i++;} else q=!q; }
+    else if(c===','&&!q){ out.push(cur); cur=''; } else cur+=c; }
+  out.push(cur); return out.map(s=>s.trim()); }
+function csvToRows(text){ const lines=text.split(/\r?\n/).filter(l=>l.trim()); if(!lines.length)return[];
+  const headers=splitCsv(lines[0]); return lines.slice(1).map(line=>{const cells=splitCsv(line);const o={};headers.forEach((h,i)=>o[h]=cells[i]||'');return o;}); }
+function mapImportRow(r){
+  const keys=Object.keys(r);
+  const g=(cands)=>{ for(const k of keys){ const kl=String(k).toLowerCase().trim(); if(cands.some(n=>kl===n||kl.includes(n))) return String(r[k]==null?'':r[k]).trim(); } return ''; };
+  let product=g(['product','team','category','vertical']);
+  const teams=CFG().teams||{};
+  if(product){ const up=product.toUpperCase();
+    if(teams[up]) product=up;
+    else { const match=Object.keys(teams).find(c=>(teams[c].name||'').toLowerCase()===product.toLowerCase()); product=match||''; } }
+  return { name:g(['name','naam','full name','lead name','customer']), phone:g(['phone','mobile','number','contact','whatsapp']),
+    email:g(['email','mail','e-mail']), city:g(['city','location','place']), product, source:g(['source','channel','lead source']) };
+}
+function parseImportFile(file){
+  if(!file)return; const info=document.getElementById('importInfo'); info.textContent='Reading file…';
+  const isCsv=/\.csv$/i.test(file.name); const reader=new FileReader();
+  reader.onload=e=>{ try{
+      let rows=[];
+      if(isCsv){ rows=csvToRows(e.target.result); }
+      else { if(typeof XLSX==='undefined'){ info.innerHTML='<span style="color:var(--red)">Excel reader load nahi hua — internet check karo ya CSV use karo.</span>'; return; }
+        const data=new Uint8Array(e.target.result); const wb=XLSX.read(data,{type:'array'});
+        rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}); }
+      IMPORT_ROWS=rows.map(mapImportRow).filter(r=>r.name);
+      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">Koi valid lead nahi mila (Name column check karo).</span>'; return; }
+      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads mile ✓</b> — "Import karo" dabao.';
+      const btn=document.getElementById('doImportBtn'); btn.disabled=false; btn.style.opacity='1';
+    }catch(err){ info.innerHTML='<span style="color:var(--red)">File error: '+err.message+'</span>'; } };
+  if(isCsv) reader.readAsText(file); else reader.readAsArrayBuffer(file);
+}
+function downloadSampleCsv(){
+  const csv='Name,Phone,Email,City,Product,Source\nRohan Sharma,+919812345678,rohan@example.com,Pune,MHS,Facebook\nPriya Verma,+919800000000,priya@example.com,Delhi,TFD,Website\n';
+  const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='leads-sample.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 function addSourceModal(){
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Lead Source</h3><span class="x" data-action="closemodal">×</span></div>
@@ -672,6 +726,10 @@ document.addEventListener('click',async function(e){
     if(a==='logout'){ if(confirm('Logout karna hai?')) logout(); return; }
     if(a==='addlead'){ return addLeadModal(); }
     if(a==='adduser'){ return addUserModal(); }
+    if(a==='import'){ return importModal(); }
+    if(a==='samplecsv'){ return downloadSampleCsv(); }
+    if(a==='doimport'){ if(!IMPORT_ROWS.length) return; const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS}); closeModal();
+      state.toastMsg='✅ '+r.created+' leads import + round-robin assign'+(r.skipped?' ('+r.skipped+' skip)':''); IMPORT_ROWS=[]; return refresh(); }
     if(a==='addproduct'){ return addProductModal(); }
     if(a==='saveproduct'){
       const code=gv('np_code'), name=gv('np_name'); if(!code||!name){alert('Code aur naam daalo');return;}
@@ -717,6 +775,7 @@ document.addEventListener('click',async function(e){
 
 document.addEventListener('change',async function(e){
   const el=e.target;
+  if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
   if(el.id==='demoSel'){ if(el.value){ const pin=el.value; state.pin=pin; render(); return doLogin(pin); } return; }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
   if(a==='setstatus'){ await api('/api/leads/'+id,'PATCH',{status:el.value}); state.toastMsg=(STATUS[el.value]?.won?'🎉 WON! Customer CRM me push ho gaya.':'Status updated'); return refresh(); }

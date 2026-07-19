@@ -396,6 +396,26 @@ const server = http.createServer(async (req, res) => {
         const { lead } = createLead({ ...b, owner_id: autoAssign ? null : b.owner_id }, user.name, { autoAssign });
         return send(res, 200, { ok: true, lead: leadJSON(lead, true) });
       }
+      // bulk import (Excel/CSV) → each lead round-robin auto-assigned
+      if (p === '/api/leads/bulk' && m === 'POST') {
+        const b = await readBody(req);
+        const list = Array.isArray(b.leads) ? b.leads : [];
+        if (!list.length) return err(res, 400, 'no leads to import');
+        if (list.length > 5000) return err(res, 400, 'max 5000 leads per import');
+        let created = 0, skipped = 0; const byAgent = {};
+        for (const row of list) {
+          if (!row || !String(row.name || '').trim()) { skipped++; continue; }
+          const { lead } = createLead({
+            name: row.name, phone: row.phone, email: row.email, city: row.city,
+            product: row.product, source: row.source || 'Bulk Upload',
+            owner_id: row.owner_id || null,
+          }, user.name + ' (import)', { autoAssign: true });
+          created++;
+          const on = userById(lead.owner_id)?.name || '—';
+          byAgent[on] = (byAgent[on] || 0) + 1;
+        }
+        return send(res, 200, { ok: true, created, skipped, byAgent });
+      }
       let mm = p.match(/^\/api\/leads\/([^/]+)$/);
       if (mm && m === 'GET') { const r = leadRow(mm[1]); return r ? send(res, 200, { lead: leadJSON(r, true) }) : err(res, 404, 'not found'); }
       if (mm && m === 'PATCH') {
