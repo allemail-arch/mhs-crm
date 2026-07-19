@@ -169,6 +169,8 @@
   @media(min-width:721px){ .mobile-only{display:none !important} }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -196,7 +198,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
-  filters:{q:'',status:'',source:'',owner:'',product:'',open:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
+  filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
   searchQ:'', searchResults:[], reportTab:'attendance', toastMsg:'', busy:false };
 
 const CFG=()=>state.cfg||{teams:{}};
@@ -218,6 +220,65 @@ const todayStr=()=>new Date().toISOString().slice(0,10);
 function loginTime(s){ if(!s)return '—'; try{ return new Date(String(s).replace(' ','T')+'Z').toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }catch(_){ return s; } }
 function downloadCSV(filename, rows){ const csv=rows.map(r=>r.map(c=>{c=String(c==null?'':c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c;}).join(',')).join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
+/* Excel (.xlsx) — one or more sheets. sheets=[{name, rows:[[...]]}] */
+function downloadXLSX(filename, sheets){
+  if(typeof XLSX==='undefined'){ return downloadCSV(filename.replace(/\.xlsx$/,'.csv'), sheets[0].rows); }
+  const wb=XLSX.utils.book_new();
+  sheets.forEach(sh=>{ const ws=XLSX.utils.aoa_to_sheet(sh.rows); XLSX.utils.book_append_sheet(wb, ws, (sh.name||'Sheet').slice(0,31)); });
+  XLSX.writeFile(wb, filename);
+}
+/* PDF — title + one or more tables. tables=[{caption, head:[...], body:[[...]]}] */
+function downloadPDF(filename, title, tables){
+  const JS = window.jspdf && window.jspdf.jsPDF;
+  if(!JS){ alert('PDF library not loaded — please check your internet and try again.'); return; }
+  const doc=new JS({orientation:'landscape'});
+  doc.setFontSize(14); doc.text(title,14,15);
+  let y=22;
+  tables.forEach(t=>{
+    if(t.caption){ doc.setFontSize(10); doc.text(t.caption,14,y); y+=2; }
+    doc.autoTable({head:[t.head], body:t.body, startY:y, styles:{fontSize:8,cellPadding:2}, headStyles:{fillColor:[45,91,227]}, margin:{left:14,right:14}});
+    y=doc.lastAutoTable.finalY+8;
+  });
+  doc.save(filename);
+}
+/* order users so same-team rows are grouped together (TFD, TPK, MHS, TPA, then rest) */
+const TEAM_ORDER=['TFD','TPK','MHS','TPA'];
+function teamRank(t){ const i=TEAM_ORDER.indexOf(t); return i<0?TEAM_ORDER.length:i; }
+function byTeamThenName(a,b){ return (teamRank(a.team)-teamRank(b.team)) || String(teamName(a.team)).localeCompare(String(teamName(b.team))) || String(a.name||'').localeCompare(String(b.name||'')); }
+function byDeptThenName(a,b){ return String(a.department||'~').localeCompare(String(b.department||'~')) || String(a.name||'').localeCompare(String(b.name||'')); }
+/* build export data for each report kind → {title, name, sheets, tables} */
+function buildReportExport(kind){
+  const dt=todayStr();
+  if(kind==='attendance'){ const x=state.reports.attendance; if(!x)return null;
+    const head=['User','Department','Role','Status','Last login'];
+    const body=x.per.slice().sort(byDeptThenName).map(u=>[u.name,u.department,u.role,u.present?'Present':'Absent',loginTime(u.lastLogin)]);
+    const deptHead=['Department','Present','Absent','Total']; const deptBody=x.byDept.map(d=>[d.department,d.present,d.absent,d.total]);
+    return {title:'Attendance — '+dt, name:'attendance-'+dt, tables:[{caption:'Department wise',head:deptHead,body:deptBody},{caption:'User wise',head,body}],
+      sheets:[{name:'By Department',rows:[deptHead,...deptBody]},{name:'User wise',rows:[head,...body]}]}; }
+  if(kind==='leadsdist'){ const x=state.reports.leadsDist; if(!x)return null;
+    const head=['Agent','Department','Total',...x.cols]; const body=x.per.slice().sort(byDeptThenName).map(u=>[u.name,u.department,u.total,...x.cols.map(c=>u.counts[c]||0)]);
+    return {title:'Leads Distribution — '+(x.from||dt), name:'leads-distribution-'+(x.from||dt), tables:[{head,body}], sheets:[{name:'Leads Distribution',rows:[head,...body]}]}; }
+  if(kind==='followups'){ const x=state.reports.followups; if(!x)return null;
+    const teamHead=['Department / Team','Overall missed','Today due']; const teamBody=(x.teams||[]).slice().sort((a,b)=>teamRank(a.team)-teamRank(b.team)).map(t=>[teamName(t.team),t.missed,t.todayDue]);
+    const head=['User','Team','Overall missed','Today due']; const body=x.per.slice().sort(byTeamThenName).map(u=>[u.name,teamCode(u.team),u.missed,u.todayDue]);
+    return {title:'Follow-up Missed — '+dt, name:'followup-missed-'+dt, tables:[{caption:'Department wise',head:teamHead,body:teamBody},{caption:'User wise',head,body}],
+      sheets:[{name:'By Department',rows:[teamHead,...teamBody]},{name:'User wise',rows:[head,...body]}]}; }
+  if(kind==='deletions'){ const x=state.reports.deletions; if(!x)return null;
+    const head=['User','Department','Deleted count']; const body=x.per.map(u=>[u.name,u.department,u.c]);
+    const recHead=['Lead','Phone','Deleted by','Department','When']; const recBody=x.recent.map(r=>[r.lead_name,r.phone||'',r.deleted_by_name||'',r.department||'',loginTime(r.created_at)]);
+    return {title:'Deleted Leads — total '+x.total, name:'deleted-leads-'+dt, tables:[{caption:'User wise',head,body},{caption:'Recent deletions',head:recHead,body:recBody}],
+      sheets:[{name:'User wise',rows:[head,...body]},{name:'Recent',rows:[recHead,...recBody]}]}; }
+  if(kind==='users'){ const x=state.reports.usersList; if(!x)return null;
+    const head=['Name','Role','Department','Team','Email']; const body=x.users.map(u=>[u.name,u.role,u.department||'',u.team,u.email||'']);
+    const dHead=['Department','Admin','TL','Sales','Total']; const dBody=x.byDept.map(d=>[d.department,d.admin,d.lead,d.sales,d.total]);
+    return {title:'User List', name:'user-list-'+dt, tables:[{caption:'Department wise',head:dHead,body:dBody},{caption:'All users',head,body}],
+      sheets:[{name:'By Department',rows:[dHead,...dBody]},{name:'All users',rows:[head,...body]}]}; }
+  return null;
+}
+function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
+  if(fmt==='pdf') downloadPDF(r.name+'.pdf', r.title, r.tables);
+  else downloadXLSX(r.name+'.xlsx', r.sheets); }
+function dlButtons(kind){ return `<button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="xlsx">⬇ Excel</button> <button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="pdf">⬇ PDF</button>`; }
 
 /* ---------------- API ---------------- */
 async function api(path,method='GET',body){
@@ -240,7 +301,7 @@ async function loadRouteData(){
   } else if(r==='leads'||r==='myleads'){
     const q=new URLSearchParams(); const f=state.filters;
     if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner);
-    if(f.product)q.set('product',f.product); if(f.open)q.set('open','1');
+    if(f.product)q.set('product',f.product); if(f.open)q.set('open','1'); if(f.overdue)q.set('overdue','1');
     state.leads=(await api('/api/leads?'+q.toString())).leads;
   } else if(r==='followups'){
     state.leads=(await api('/api/leads')).leads;
@@ -269,8 +330,8 @@ async function go(route,params){ state.route=route; state.params=params||{}; win
 async function refresh(){ try{ await loadRouteData(); }catch(e){ return; } render(); }
 
 async function doLogin(pin){
-  let r; try{ r=await api('/api/login','POST',{pin}); }catch(e){ state.loginErr='Server se connect nahi ho paya'; state.pin=''; render(); return; }
-  if(r.error){ state.loginErr=r.error+'. Dubara try karo.'; state.pin=''; render(); return; }
+  let r; try{ r=await api('/api/login','POST',{pin}); }catch(e){ state.loginErr='Could not connect to the server'; state.pin=''; render(); return; }
+  if(r.error){ state.loginErr=r.error+'. Please try again.'; state.pin=''; render(); return; }
   state.token=r.token; state.user=r.user;
   const me=await api('/api/me'); setCfg(me.config);
   state.users=(await api('/api/users')).users;
@@ -321,7 +382,7 @@ function renderShell(inner){
   const addBtn=(u.role!=='lead')?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
   return `<div class="app">
     <div class="topbar"><div class="logo">M<b>H</b>S</div><div class="topnav">${top}</div>
-      <input id="globalSearch" placeholder="🔍 Lead search — kiske paas hai?" value="${esc(state.searchQ||'')}" style="flex:1;max-width:280px;margin-left:10px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff">
+      <input id="globalSearch" placeholder="🔍 Search leads — who owns it?" value="${esc(state.searchQ||'')}" style="flex:1;max-width:280px;margin-left:10px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff">
       <div class="spacer"></div>
       ${addBtn}
       <div class="userchip"><div class="avatar">${initials(u.name)}</div>
@@ -393,13 +454,13 @@ function renderDashboard(){
     const todayLs=openLs.filter(l=>isOverdue(l.next_followup)||isToday(l.next_followup)).sort((a,b)=>parseD(a.next_followup)-parseD(b.next_followup));
     const first=esc(state.user.name.split(' ')[0]);
     const list=todayLs.length?`<div class="cards" style="display:flex">${todayLs.map(todayCallCard).join('')}</div>`
-      :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 Aaj ke saare calls done!</div></div>`;
-    return `<div class="page-h"><h2>Namaste, ${first} 👋</h2></div>
+      :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 All calls done for today!</div></div>`;
+    return `<div class="page-h"><h2>Hello, ${first} 👋</h2></div>
       <div class="panel" style="margin-bottom:16px;border:2px solid #ffe0c2">
-        <div class="panel-h" style="color:var(--orange)">📞 Aaj call karni hai — ${todayLs.length} leads<span class="badge b-rnr">Priority</span></div>
+        <div class="panel-h" style="color:var(--orange)">📞 Calls to make today — ${todayLs.length} leads<span class="badge b-rnr">Priority</span></div>
         <div class="panel-b">${list}</div></div>
       ${kpis}
-      <div class="grid2">${targetCard('Mera Target (month)',sm.total,sm.interested,sm.won,CFG().agentTarget||{leads:20,interested:6,closed:2})}
+      <div class="grid2">${targetCard('My Target (month)',sm.total,sm.interested,sm.won,CFG().agentTarget||{leads:20,interested:6,closed:2})}
         <div class="panel"><div class="panel-h">My Funnel</div><div class="panel-b funnel">${funnelHTML(sm.funnel)}</div></div></div>`;
   }
 
@@ -409,8 +470,8 @@ function renderDashboard(){
   let junkAlert='';
   if(offenders.length) junkAlert=`<div class="panel" style="border:2px solid #ffd0cf;background:#fff7f7;margin-bottom:16px">
     <div class="panel-b" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-size:22px">⚠️</span>
-    <div style="flex:1"><b style="color:var(--red)">Junk alert:</b> ${offenders.map(x=>`<span data-drill data-fowner="${x.id}" data-fstatus="Junk" style="cursor:pointer;text-decoration:underline">${esc(x.name)}</span> ne <b>${x.junk}</b> leads Junk maari`).join(' • ')}.
-    <span class="lead-sub">Inke leads review karo.</span></div></div></div>`;
+    <div style="flex:1"><b style="color:var(--red)">Junk alert:</b> ${offenders.map(x=>`<span data-drill data-fowner="${x.id}" data-fstatus="Junk" style="cursor:pointer;text-decoration:underline">${esc(x.name)}</span> marked <b>${x.junk}</b> leads as Junk`).join(' • ')}.
+    <span class="lead-sub">Please review these leads.</span></div></div></div>`;
 
   const agents=state.reports.agents||[];
   const teamAgg={}; agents.forEach(a=>{const t=teamAgg[a.team]=teamAgg[a.team]||{leads:0,interested:0,closed:0};
@@ -431,21 +492,21 @@ function renderDashboard(){
       <td class="num">${fmtDur(a.talktime)}</td>
       <td class="num" ${respFlag}>${a.avgRespMin!=null?a.avgRespMin+' min':'—'}</td>
       <td class="num" ${a.junk>=3?'style="color:var(--red);font-weight:700"':''}>${a.junk}</td></tr>`;}).join('');
-  const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — kaun kaam kar raha hai
-    <span class="lead-sub">🟢 Working = aaj connected call kiya • ⚪ Idle = aaj koi call nahi • Calls = connected only • Avg response = lead aane se pehli call tak</span></div>
+  const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — who is working
+    <span class="lead-sub">🟢 Working = made a connected call today • ⚪ Idle = no calls today • Calls = connected only • Avg response = from lead arrival to first call</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th>Status</th><th style="text-align:right">Calls today</th><th style="text-align:right">Talk time</th><th style="text-align:right">Avg response</th><th style="text-align:right">Junk</th></tr></thead>
     <tbody>${actRows}</tbody></table></div></div>`;
 
   // agent report (grouped by team)
   const cols=['Fresh','Follow Up','Interested','Not Interested','Closed Won'];
-  const sorted=agents.slice().sort((a,b)=>a.team.localeCompare(b.team)||a.name.localeCompare(b.name));
+  const sorted=agents.slice().sort(byTeamThenName);
   let rows='',lastTeam='';
   sorted.forEach(u=>{const cells=cols.map(c=>{const v=u.counts[c]||0;
       return `<td class="num" ${v?`data-drillowner="${u.id}" data-drillstatus="${c}" style="cursor:pointer;color:var(--blue);font-weight:700"`:''}>${v||'<span style="color:#c4c9d4">0</span>'}</td>`;}).join('');
     const teamCell=u.team!==lastTeam?`<td class="grp-td">${teamName(u.team)}</td>`:'<td></td>'; lastTeam=u.team;
     rows+=`<tr>${teamCell}<td data-drillowner="${u.id}" style="cursor:pointer"><div class="lead-nm" style="color:var(--blue)">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></td>
       <td class="num" style="font-weight:800;cursor:pointer;color:var(--blue)" data-drillowner="${u.id}">${u.total}</td>${cells}</tr>`;});
-  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent<span class="lead-sub">kisi number/naam pe click karo → wo leads khul jayenge</span></div>
+  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent<span class="lead-sub">click any number/name → those leads open</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Team</th><th>Owner</th><th style="text-align:right">Total</th>
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
@@ -478,7 +539,7 @@ function filterBar(showOwner){
   const srOpt=srcList().map(s=>`<option ${f.source===s?'selected':''}>${s}</option>`).join('');
   const owOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}" ${f.product===p?'selected':''}>${teamName(p)}</option>`).join('');
-  const any=f.status||f.source||f.owner||f.product||f.open||f.q;
+  const any=f.status||f.source||f.owner||f.product||f.open||f.overdue||f.q;
   return `<div class="filters">
     <input class="search" id="fq" placeholder="🔍  Search name, phone, city…" value="${esc(f.q)}">
     <select id="fstatus"><option value="">All Status</option>${stOpt}</select>
@@ -486,6 +547,7 @@ function filterBar(showOwner){
     ${showOwner?`<select id="fproduct"><option value="">All Products</option>${prOpt}</select>`:''}
     ${showOwner?`<select id="fowner"><option value="">All Owners</option>${owOpt}</select>`:''}
     ${f.open?'<span class="pill">Open only</span>':''}
+    ${f.overdue?'<span class="pill" style="background:#fdecea;color:#c0392b">⏰ Overdue follow-ups only</span>':''}
     ${any?'<button class="btn ghost sm" data-action="clearfilters">✕ Clear</button>':''}</div>`;
 }
 function renderLeads(mineOnly){
@@ -523,16 +585,17 @@ function renderFollowups(){
       <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
   const sec=(t,arr,c)=>arr.length?`<div class="page-h" style="margin-top:18px"><h2 style="font-size:16px;color:${c}">${t}</h2><span class="cnt">${arr.length}</span></div><div class="cards" style="display:flex">${arr.map(card).join('')}</div>`:'';
   const empty=ls.length?'':'<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">🎉 No pending follow-ups.</div></div>';
-  let missedPanel='';
+  let missedPanel='', dlBar='';
   if(state.user.role!=='sales' && state.reports.followups){
     const {per,teams}=state.reports.followups;
-    const teamRows=teams.map(t=>`<tr><td><span class="pill">${teamCode(t.team)}</span> ${teamName(t.team)}</td><td class="num ${t.missed>0?'overdue':''}">${t.missed}</td><td class="num">${t.todayDue}</td></tr>`).join('')||'<tr><td colspan="3" style="text-align:center;color:var(--muted)">—</td></tr>';
-    const userRows=per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
+    const teamRows=(teams||[]).slice().sort((a,b)=>teamRank(a.team)-teamRank(b.team)).map(t=>`<tr data-drill data-fproduct="${t.team}" data-foverdue="1" style="cursor:pointer"><td><span class="pill">${teamCode(t.team)}</span> ${teamName(t.team)}</td><td class="num ${t.missed>0?'overdue':''}">${t.missed}</td><td class="num">${t.todayDue}</td></tr>`).join('')||'<tr><td colspan="3" style="text-align:center;color:var(--muted)">—</td></tr>';
+    const userRows=per.slice().sort(byTeamThenName).map(u=>`<tr data-drill data-fowner="${u.id}" data-foverdue="1" style="cursor:pointer"><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
     missedPanel=`<div class="grid2" style="margin-bottom:16px">
-      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — Department wise</div><div style="overflow-x:auto"><table><thead><tr><th>Department / Team</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${teamRows}</tbody></table></div></div>
-      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — User wise</div><div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${userRows}</tbody></table></div></div></div>`;
+      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — Department wise <span class="lead-sub">click a row to see whose</span></div><div style="overflow-x:auto"><table><thead><tr><th>Department / Team</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${teamRows}</tbody></table></div></div>
+      <div class="panel"><div class="panel-h">🔴 Missed follow-ups — User wise <span class="lead-sub">click a user to open their missed leads</span></div><div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${userRows}</tbody></table></div></div></div>`;
+    dlBar=`<div class="spacer"></div>${dlButtons('followups')}`;
   }
-  return `<div class="page-h"><h2>Follow-ups</h2><span class="cnt">${ls.length} pending</span></div>${missedPanel}${empty}
+  return `<div class="page-h"><h2>Follow-ups</h2><span class="cnt">${ls.length} pending</span>${dlBar}</div>${missedPanel}${empty}
     ${sec('🔴 Overdue',overdue,'#e5484d')}${sec('🟠 Today',today,'#c77700')}${sec('🔵 Upcoming',up,'#1971c2')}`;
 }
 
@@ -570,14 +633,14 @@ function renderConnectors(){
     const srcs=state.connectors.filter(c=>c.team===tk&&c.connected).map(c=>c.key).join(', ')||'—';
     return `<tr><td><span class="pill">${tk}</span> ${teamName(tk)}</td><td>${srcs}</td><td class="lead-sub">${ags}</td></tr>`;}).join('');
   return `<div class="page-h"><h2>Sources & Automation</h2></div>
-    <div class="page-h" style="margin-top:4px"><h2 style="font-size:15px">🔌 Lead Connectors</h2><span class="cnt">jahan se lead aata hai</span></div>
+    <div class="page-h" style="margin-top:4px"><h2 style="font-size:15px">🔌 Lead Connectors</h2><span class="cnt">where leads come from</span></div>
     <div class="grid2">${cards}</div>
     <div class="grid2" style="margin-top:8px">
       <div class="panel"><div class="panel-h">⚙️ Automation Rules</div><div class="panel-b" style="padding-top:2px">
-        ${tog('roundRobin','Round-robin auto-assign','Naya lead aate hi agents ko bari-bari auto assign')}
-        ${tog('autoWaOnMiss','Missed call → Auto WhatsApp','No-answer par auto WhatsApp')}
-        ${tog('autoRnrOnMiss','Missed call → Auto RNR','No-answer par lead RNR + reminder')}
-        ${tog('autoFollowup','Auto follow-up reminder','Open lead close na ho jab tak')}
+        ${tog('roundRobin','Round-robin auto-assign','Every new lead is auto-assigned to agents in turn')}
+        ${tog('autoWaOnMiss','Missed call → Auto WhatsApp','On no-answer, send an automatic WhatsApp')}
+        ${tog('autoRnrOnMiss','Missed call → Auto RNR','On no-answer, move lead to RNR + set reminder')}
+        ${tog('autoFollowup','Auto follow-up reminder','Keeps a follow-up reminder alive until the lead is closed')}
       </div></div>
       <div class="panel"><div class="panel-h">🎯 Routing — Product / Team<button class="btn sm" data-action="addproduct">+ Add Product</button></div>
         <div style="overflow-x:auto"><table><thead><tr><th>Product / Team</th><th>Sources</th><th>Round-robin agents</th></tr></thead>
@@ -597,7 +660,7 @@ function renderSettings(){
         <button class="btn block" data-action="savesettings">Save targets</button></div></div>
       <div class="panel"><div class="panel-h">📥 Lead Sources<button class="btn sm" data-action="addsource">+ Add Source</button></div>
         <div class="panel-b"><div style="display:flex;flex-wrap:wrap">${srcRows}</div>
-        <div class="lead-sub" style="margin-top:10px">Naya source add karo (Instagram, Justdial, etc.) — lead form + reports me aa jaayega.</div></div></div>
+        <div class="lead-sub" style="margin-top:10px">Add a new source (Instagram, Justdial, etc.) — it will appear in the lead form and reports.</div></div></div>
     </div>
     <div class="panel" style="margin-top:16px"><div class="panel-h">Quick actions</div><div class="panel-b" style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn ghost" data-action="adduser">👥 Add User</button>
@@ -612,10 +675,10 @@ function importModal(){
   IMPORT_ROWS=[];
   openModal(`<div class="modal"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="lead-sub" style="margin-bottom:10px">File me columns (kisi bhi order me): <b>Name, Phone, Email, City, Product, Source</b>. Sirf <b>Name</b> zaroori hai. Har lead round-robin se agents ko <b>auto-assign</b> hoga.</div>
+      <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. Only <b>Name</b> is required. Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped.</div>
       <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="margin-bottom:12px;width:100%">
       <div id="importInfo" class="lead-sub" style="min-height:18px;margin-bottom:10px"></div>
-      <button class="btn block" data-action="doimport" id="doImportBtn" disabled style="opacity:.5">Import karo</button>
+      <button class="btn block" data-action="doimport" id="doImportBtn" disabled style="opacity:.5">Import</button>
       <div style="margin-top:10px;text-align:center"><button class="btn ghost sm" data-action="samplecsv">↓ Sample CSV download</button></div>
     </div></div>`);
 }
@@ -643,12 +706,12 @@ function parseImportFile(file){
   reader.onload=e=>{ try{
       let rows=[];
       if(isCsv){ rows=csvToRows(e.target.result); }
-      else { if(typeof XLSX==='undefined'){ info.innerHTML='<span style="color:var(--red)">Excel reader load nahi hua — internet check karo ya CSV use karo.</span>'; return; }
+      else { if(typeof XLSX==='undefined'){ info.innerHTML='<span style="color:var(--red)">Excel reader did not load — check your internet or use a CSV.</span>'; return; }
         const data=new Uint8Array(e.target.result); const wb=XLSX.read(data,{type:'array'});
         rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}); }
       IMPORT_ROWS=rows.map(mapImportRow).filter(r=>r.name);
-      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">Koi valid lead nahi mila (Name column check karo).</span>'; return; }
-      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads mile ✓</b> — "Import karo" dabao.';
+      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">No valid leads found (check the Name column).</span>'; return; }
+      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads found ✓</b> — click "Import".';
       const btn=document.getElementById('doImportBtn'); btn.disabled=false; btn.style.opacity='1';
     }catch(err){ info.innerHTML='<span style="color:var(--red)">File error: '+err.message+'</span>'; } };
   if(isCsv) reader.readAsText(file); else reader.readAsArrayBuffer(file);
@@ -674,10 +737,10 @@ function renderReports(){
   const fu=state.reports.followups||{per:[],teams:[]};
 
   const deptRows=att.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num" style="color:var(--green);font-weight:700">${d.present}</td><td class="num" style="color:var(--red);font-weight:700">${d.absent}</td><td class="num">${d.total}</td></tr>`).join('');
-  const userRows=att.per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.department)}</span></td>
+  const userRows=att.per.slice().sort(byDeptThenName).map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.department)}</span></td>
     <td>${u.present?'<span class="badge b-interested">● Present</span>':'<span class="badge b-lost">● Absent</span>'}</td>
     <td class="lead-sub">${loginTime(u.lastLogin)}</td></tr>`).join('');
-  const attPanel=`<div class="panel"><div class="panel-h">🟢 Attendance — aaj (kaun login kiya)<button class="btn ghost sm" data-action="dl-attendance">⬇ Download</button></div>
+  const attPanel=`<div class="panel"><div class="panel-h">🟢 Attendance — today (who logged in)<span>${dlButtons('attendance')}</span></div>
     <div class="panel-b">
       <div class="kpis" style="margin-bottom:12px">
         <div class="kpi"><div class="lbl">Present today</div><div class="val g">${att.present}</div></div>
@@ -688,44 +751,44 @@ function renderReports(){
       <div style="overflow-x:auto"><b class="lead-sub">User wise</b><table><thead><tr><th>User</th><th>Status</th><th>Last login</th></tr></thead><tbody>${userRows}</tbody></table></div></div>
     </div></div>`;
 
-  const ldRows=ld.per.map(u=>{const cells=ld.cols.map(c=>`<td class="num">${u.counts[c]||0}</td>`).join('');
+  const ldRows=ld.per.slice().sort(byDeptThenName).map(u=>{const cells=ld.cols.map(c=>`<td class="num">${u.counts[c]||0}</td>`).join('');
     return `<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.department)}</span></td><td class="num" style="font-weight:800">${u.total}</td>${cells}</tr>`;}).join('');
   const ldPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">📥 Leads Distribution — ${ld.from===ld.to?ld.from:(ld.from+' → '+ld.to)}
-    <span><input type="date" id="rptDate" value="${esc(state.reportDate||ld.from)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px"> <button class="btn sm" data-action="rptdate">Apply</button> <button class="btn ghost sm" data-action="dl-leadsdist">⬇ Download</button></span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th style="text-align:right">Total</th>${ld.cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${ldRows||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">Is din koi lead assign nahi hua</td></tr>'}</tbody></table></div></div>`;
+    <span><input type="date" id="rptDate" value="${esc(state.reportDate||ld.from)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px"> <button class="btn sm" data-action="rptdate">Apply</button> ${dlButtons('leadsdist')}</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th style="text-align:right">Total</th>${ld.cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${ldRows||'<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No leads assigned on this day</td></tr>'}</tbody></table></div></div>`;
 
-  const fuRows=fu.per.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
-  const fuPanel=`<div class="panel"><div class="panel-h">🔴 Follow-up Missed Report<button class="btn ghost sm" data-action="dl-followups">⬇ Download</button></div>
+  const fuRows=fu.per.slice().sort(byTeamThenName).map(u=>`<tr data-drill data-fowner="${u.id}" data-foverdue="1" style="cursor:pointer"><td>${esc(u.name)} <span class="lead-sub">${teamCode(u.team)}</span></td><td class="num ${u.missed>0?'overdue':''}">${u.missed}</td><td class="num">${u.todayDue}</td></tr>`).join('');
+  const fuPanel=`<div class="panel"><div class="panel-h">🔴 Follow-up Missed Report <span class="lead-sub">click a user to open their missed leads</span><span>${dlButtons('followups')}</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Overall missed</th><th style="text-align:right">Today due</th></tr></thead><tbody>${fuRows}</tbody></table></div></div>`;
 
   const del=state.reports.deletions||{total:0,per:[],byDept:[],recent:[]};
-  const delPer=del.per.map(u=>`<tr><td>${esc(u.name||'—')} <span class="lead-sub">${esc(u.department||'')}</span></td><td class="num" style="font-weight:700">${u.c}</td></tr>`).join('')||'<tr><td colspan="2" style="text-align:center;color:var(--muted);padding:16px">Abhi tak koi lead delete nahi hua</td></tr>';
+  const delPer=del.per.map(u=>`<tr><td>${esc(u.name||'—')} <span class="lead-sub">${esc(u.department||'')}</span></td><td class="num" style="font-weight:700">${u.c}</td></tr>`).join('')||'<tr><td colspan="2" style="text-align:center;color:var(--muted);padding:16px">No leads deleted yet</td></tr>';
   const delDept=del.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num">${d.c}</td></tr>`).join('');
   const delRec=del.recent.map(r=>`<tr><td>${esc(r.lead_name)}</td><td class="lead-sub">${esc(r.phone||'')}</td><td>${esc(r.deleted_by_name||'—')} <span class="lead-sub">${esc(r.department||'')}</span></td><td class="lead-sub">${loginTime(r.created_at)}</td></tr>`).join('');
-  const delPanel=`<div class="panel"><div class="panel-h">🗑️ Deleted Leads — total ${del.total}<button class="btn ghost sm" data-action="dl-deletions">⬇ Download</button></div>
+  const delPanel=`<div class="panel"><div class="panel-h">🗑️ Deleted Leads — total ${del.total}<span>${dlButtons('deletions')}</span></div>
     <div class="panel-b"><div class="grid2">
-      <div style="overflow-x:auto"><b class="lead-sub">User wise (kisne kitne delete kiye)</b><table><thead><tr><th>User</th><th style="text-align:right">Deleted</th></tr></thead><tbody>${delPer}</tbody></table></div>
+      <div style="overflow-x:auto"><b class="lead-sub">User wise (who deleted how many)</b><table><thead><tr><th>User</th><th style="text-align:right">Deleted</th></tr></thead><tbody>${delPer}</tbody></table></div>
       <div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Deleted</th></tr></thead><tbody>${delDept||'<tr><td colspan="2" class="lead-sub">—</td></tr>'}</tbody></table></div></div>
       <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">Recent deletions</b><table><thead><tr><th>Lead</th><th>Phone</th><th>Deleted by</th><th>When</th></tr></thead><tbody>${delRec||'<tr><td colspan="4" class="lead-sub">—</td></tr>'}</tbody></table></div></div></div>`;
 
   const ul=state.reports.usersList||{counts:{total:0,admin:0,lead:0,sales:0},byDept:[],users:[]};
   const rB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
-  const uRows=ul.users.map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.email||'')}</span></td><td>${rB(u.role)}</td><td>${esc(u.department||'—')}</td><td>${u.team==='-'?'—':teamName(u.team)}</td></tr>`).join('');
+  const uRows=ul.users.slice().sort(byDeptThenName).map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.email||'')}</span></td><td>${rB(u.role)}</td><td>${esc(u.department||'—')}</td><td>${u.team==='-'?'—':teamName(u.team)}</td></tr>`).join('');
   const uDept=ul.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num">${d.admin}</td><td class="num">${d.lead}</td><td class="num">${d.sales}</td><td class="num" style="font-weight:700">${d.total}</td></tr>`).join('');
-  const usersPanel=`<div class="panel"><div class="panel-h">👥 User List<button class="btn ghost sm" data-action="dl-users">⬇ Download</button></div>
+  const usersPanel=`<div class="panel"><div class="panel-h">👥 User List<span>${dlButtons('users')}</span></div>
     <div class="panel-b"><div class="kpis" style="margin-bottom:12px">
       <div class="kpi"><div class="lbl">Total Users</div><div class="val b">${ul.counts.total}</div></div>
       <div class="kpi"><div class="lbl">Admins</div><div class="val">${ul.counts.admin}</div></div>
       <div class="kpi"><div class="lbl">Team Leads</div><div class="val">${ul.counts.lead}</div></div>
       <div class="kpi"><div class="lbl">Sales</div><div class="val g">${ul.counts.sales}</div></div></div>
       <div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Admin</th><th style="text-align:right">TL</th><th style="text-align:right">Sales</th><th style="text-align:right">Total</th></tr></thead><tbody>${uDept}</tbody></table></div>
-      <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">All users (ek saath)</b><table><thead><tr><th>User</th><th>Role</th><th>Department</th><th>Team/Product</th></tr></thead><tbody>${uRows}</tbody></table></div></div></div>`;
+      <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">All users (combined)</b><table><thead><tr><th>User</th><th>Role</th><th>Department</th><th>Team/Product</th></tr></thead><tbody>${uRows}</tbody></table></div></div></div>`;
 
   const tab=state.reportTab||'attendance';
   const tabs=[['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
   const tabBar=`<div class="filters" style="gap:6px;margin-bottom:16px">${tabs.map(t=>`<button class="btn ${tab===t[0]?'':'ghost'} sm" data-action="rtab" data-tab="${t[0]}">${t[1]}</button>`).join('')}</div>`;
   const panels={attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
-  return `<div class="page-h"><h2>Reports</h2><span class="cnt">tab pe click karo • download karo</span></div>${tabBar}${panels[tab]||attPanel}`;
+  return `<div class="page-h"><h2>Reports</h2><span class="cnt">click a tab • download as Excel or PDF</span></div>${tabBar}${panels[tab]||attPanel}`;
 }
 
 /* ---------------- SEARCH (global lead lookup) ---------------- */
@@ -733,13 +796,13 @@ function renderSearch(){
   const rows=(state.searchResults||[]).map(l=>`<tr data-lead="${l.id}"><td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone||'')} • ${esc(l.city||'')}</div></td>
     <td>${badge(l.status)}</td><td><span class="pill">${esc(l.product||'')}</span></td><td>${srcChip(l.source)}</td>
     <td><b>${esc(l.owner_name||'—')}</b> <span class="lead-sub">${l.owner_team?teamCode(l.owner_team):''}</span></td></tr>`).join('');
-  const table=state.searchQ? (rows?`<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Product</th><th>Source</th><th>Owner (kiske paas)</th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : '<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">Koi lead nahi mila "'+esc(state.searchQ)+'" ke liye.</div></div>')
-    : '<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">Upar search box me lead ka naam/phone likho — kiske paas hai turant pata chalega.</div></div>';
+  const table=state.searchQ? (rows?`<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Product</th><th>Source</th><th>Owner (who has it)</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : '<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">No lead found for "'+esc(state.searchQ)+'".</div></div>')
+    : '<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">Type a lead name / phone in the search box above — you\'ll instantly see who owns it.</div></div>';
   const cards=(state.searchResults||[]).map(l=>`<div class="lcard" data-lead="${l.id}"><div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone||'')} • ${esc(l.city||'')}</div></div>${badge(l.status)}</div>
     <div class="row"><span class="pill">${esc(l.product||'')}</span>${srcChip(l.source)}<span class="meta">👤 <b>${esc(l.owner_name||'—')}</b></span></div></div>`).join('');
   return `<div class="page-h"><h2>Lead Search</h2><span class="cnt">${state.searchQ?((state.searchResults||[]).length+' result'):''}</span></div>
-    <div class="filters"><input class="search" id="searchBox" placeholder="🔍 Lead ka naam / phone / city…" value="${esc(state.searchQ||'')}"><button class="btn sm" data-action="dosearch">Search</button></div>
+    <div class="filters"><input class="search" id="searchBox" placeholder="🔍 Lead name / phone / city…" value="${esc(state.searchQ||'')}"><button class="btn sm" data-action="dosearch">Search</button></div>
     ${table}<div class="cards">${cards}</div>`;
 }
 
@@ -753,7 +816,7 @@ function renderLeadDetail(){
   const canReassign=state.user.role!=='sales';
   const timeline=(l.activities||[]).slice().reverse().map(a=>`<li><div class="tt">${esc(a.title)}</div>
     <div class="tm">${fmtDateTime(a.created_at)} • ${esc(a.by_name)}${a.sub?' • '+esc(a.sub):''}</div></li>`).join('');
-  const wonBadge=l.converted?`<span class="convo">✓ Customer CRM me push ho gaya</span>`:'';
+  const wonBadge=l.converted?`<span class="convo">✓ Pushed to Customer CRM</span>`:'';
   return `<div class="page-h"><a data-nav="back" style="font-weight:700">← Back</a></div>
   <div class="ld-head"><div class="r1"><div class="ld-avatar">${initials(l.name)}</div>
     <div style="flex:1"><h2>${esc(l.name)}</h2>
@@ -772,7 +835,7 @@ function renderLeadDetail(){
       <div class="field"><label>Status</label><select data-action="setstatus" data-lead="${l.id}">${stOpt}</select></div>
       <div class="field"><label>Next follow-up (reminder)</label><input type="date" value="${fuVal}" data-action="setfollow" data-lead="${l.id}"></div>
       ${canReassign?`<div class="field"><label>Assign to (owner)</label><select data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
-      <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Call ka summary likho…"></textarea></div>
+      <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Write a call summary…"></textarea></div>
       <button class="btn block" data-action="addnote" data-lead="${l.id}">Save note</button></div></div>
     <div class="panel"><div class="panel-h">Activity Timeline</div><div class="panel-b"><ul class="timeline">${timeline}</ul></div></div></div>`;
 }
@@ -788,7 +851,7 @@ function addLeadModal(){
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add New Lead</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="field"><label>Name</label><input id="nl_name" placeholder="Customer ka naam"></div>
+      <div class="field"><label>Name</label><input id="nl_name" placeholder="Customer name"></div>
       <div class="field"><label>Phone</label><input id="nl_phone" placeholder="+91 …"></div>
       <div class="field"><label>Email</label><input id="nl_email"></div>
       <div class="field"><label>City</label><input id="nl_city"></div>
@@ -803,7 +866,7 @@ function addProductModal(){
       <div class="field"><label>Short code (2–5 letters)</label><input id="np_code" maxlength="5" placeholder="e.g. TPX" style="text-transform:uppercase"></div>
       <div class="field"><label>Full name</label><input id="np_name" placeholder="e.g. The Powerful X"></div>
       <div class="field"><label>Colour</label><input id="np_color" type="color" value="#2d5be3" style="height:44px;padding:4px"></div>
-      <div class="lead-sub" style="margin-bottom:12px">Add karne ke baad ye product lead form, routing, aur reports sab jagah dikhega. Iske liye agents assign karne ke liye Team me jaake unka product badlo.</div>
+      <div class="lead-sub" style="margin-bottom:12px">Once added, this product appears everywhere — lead form, routing, and reports. To assign agents to it, go to Team and change their product.</div>
       <button class="btn block" data-action="saveproduct">Add Product</button></div></div>`);
 }
 function addUserModal(){
@@ -835,66 +898,64 @@ document.addEventListener('click',async function(e){
 
   const act=e.target.closest('[data-action]');
   if(act){ const a=act.dataset.action, id=act.dataset.lead;
-    if(a==='logout'){ if(confirm('Logout karna hai?')) logout(); return; }
+    if(a==='logout'){ if(confirm('Log out?')) logout(); return; }
     if(a==='addlead'){ return addLeadModal(); }
     if(a==='adduser'){ return addUserModal(); }
-    if(a==='deletelead'){ if(confirm('Ye lead delete karna hai? Delete report me record rahega.')){ await api('/api/leads/'+id,'DELETE'); state.toastMsg='🗑️ Lead delete ho gaya'; return go(state.user.role==='sales'?'myleads':'leads'); } return; }
+    if(a==='deletelead'){ if(confirm('Delete this lead? It will be recorded in the delete report.')){ await api('/api/leads/'+id,'DELETE'); state.toastMsg='🗑️ Lead deleted'; return go(state.user.role==='sales'?'myleads':'leads'); } return; }
     if(a==='rtab'){ state.reportTab=act.dataset.tab; return render(); }
     if(a==='dosearch'){ state.searchQ=gv('searchBox'); return go('search'); }
-    if(a==='dl-deletions'){ const x=state.reports.deletions; if(!x)return; downloadCSV('deleted-leads-'+todayStr()+'.csv',[['User','Department','Deleted count'],...x.per.map(u=>[u.name,u.department,u.c])]); return; }
-    if(a==='dl-users'){ const x=state.reports.usersList; if(!x)return; downloadCSV('user-list-'+todayStr()+'.csv',[['Name','Role','Department','Team','Email'],...x.users.map(u=>[u.name,u.role,u.department||'',u.team,u.email||''])]); return; }
+    if(a==='dlx'){ return doExport(act.dataset.kind, act.dataset.fmt); }
     if(a==='rptdate'){ state.reportDate=gv('rptDate'); return refresh(); }
-    if(a==='dl-attendance'){ const x=state.reports.attendance; if(!x)return; downloadCSV('attendance-'+todayStr()+'.csv',[['User','Department','Role','Status','Last login'],...x.per.map(u=>[u.name,u.department,u.role,u.present?'Present':'Absent',loginTime(u.lastLogin)])]); return; }
-    if(a==='dl-leadsdist'){ const x=state.reports.leadsDist; if(!x)return; downloadCSV('leads-distribution-'+(x.from||todayStr())+'.csv',[['Agent','Department','Total',...x.cols],...x.per.map(u=>[u.name,u.department,u.total,...x.cols.map(c=>u.counts[c]||0)])]); return; }
-    if(a==='dl-followups'){ const x=state.reports.followups; if(!x)return; downloadCSV('followup-missed-'+todayStr()+'.csv',[['User','Team','Overall missed','Today due'],...x.per.map(u=>[u.name,u.team,u.missed,u.todayDue])]); return; }
     if(a==='import'){ return importModal(); }
     if(a==='samplecsv'){ return downloadSampleCsv(); }
     if(a==='doimport'){ if(!IMPORT_ROWS.length) return; const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS}); closeModal();
-      state.toastMsg='✅ '+r.created+' leads import + round-robin assign'+(r.skipped?' ('+r.skipped+' skip)':''); IMPORT_ROWS=[]; return refresh(); }
+      state.toastMsg='✅ '+r.created+' leads imported + round-robin assigned'+(r.duplicates?' ('+r.duplicates+' duplicate phone skipped)':'')+(r.skipped?' ('+r.skipped+' invalid skipped)':''); IMPORT_ROWS=[]; return refresh(); }
     if(a==='addproduct'){ return addProductModal(); }
     if(a==='saveproduct'){
-      const code=gv('np_code'), name=gv('np_name'); if(!code||!name){alert('Code aur naam daalo');return;}
+      const code=gv('np_code'), name=gv('np_name'); if(!code||!name){alert('Enter a code and a name');return;}
       const r=await api('/api/teams','POST',{code,name,color:document.getElementById('np_color').value});
       if(r.error){alert(r.error);return;}
       const me=await api('/api/me'); setCfg(me.config); closeModal();
-      state.toastMsg='Product add ho gaya: '+r.code; return refresh();
+      state.toastMsg='Product added: '+r.code; return refresh();
     }
     if(a==='addsource'){ return addSourceModal(); }
-    if(a==='savesource'){ const name=gv('ns_name'); if(!name){alert('Naam daalo');return;}
+    if(a==='savesource'){ const name=gv('ns_name'); if(!name){alert('Enter a name');return;}
       await api('/api/sources','POST',{name,icon:gv('ns_icon')||name.slice(0,2),color:document.getElementById('ns_color').value});
-      const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source add ho gaya: '+name; return refresh(); }
+      const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source added: '+name; return refresh(); }
     if(a==='savesettings'){ await api('/api/settings','PATCH',{target_leads:+gv('st_leads'),target_interested:+gv('st_int'),target_closed:+gv('st_closed')});
-      const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets save ho gaye ✓'; return refresh(); }
+      const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets saved ✓'; return refresh(); }
     if(a==='applydash'){ const val=id=>{const e=document.getElementById(id);return e?e.value:'';};
       state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer')}; return refresh(); }
     if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:''}; return refresh(); }
-    if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Email khul raha hai…'; return refresh(); }
-    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:''}; return refresh(); }
+    if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Opening email…'; return refresh(); }
+    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:''}; return refresh(); }
     if(a==='closemodal'){ return closeModal(); }
     if(a==='savelead'){
-      const name=gv('nl_name'); if(!name){alert('Naam daalo');return;}
+      const name=gv('nl_name'); if(!name){alert('Enter a name');return;}
       const body={name,phone:gv('nl_phone'),email:gv('nl_email'),city:gv('nl_city'),
         product:document.getElementById('nl_product').value,source:document.getElementById('nl_source').value,
         owner_id:document.getElementById('nl_owner').value};
-      const r=await api('/api/leads','POST',body); closeModal();
-      state.toastMsg='Lead add ho gaya → '+r.lead.owner_name; return refresh();
+      const r=await api('/api/leads','POST',body);
+      if(r.duplicate){ alert('This phone number already exists — lead "'+r.lead.name+'" is owned by '+r.owner_name+'. One phone = one lead.'); return; }
+      closeModal();
+      state.toastMsg='Lead added → '+r.lead.owner_name; return refresh();
     }
     if(a==='saveuser'){
-      const name=gv('nu_name'); if(!name){alert('Naam daalo');return;}
+      const name=gv('nu_name'); if(!name){alert('Enter a name');return;}
       const pin=gv('nu_pin')||'0000';
       await api('/api/users','POST',{name,email:gv('nu_email'),phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),pin});
-      closeModal(); state.toastMsg=name+' add ho gaya. PIN: '+pin; if(state.route==='users') return refresh(); return; }
+      closeModal(); state.toastMsg=name+' added. PIN: '+pin; if(state.route==='users') return refresh(); return; }
     if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
     if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
-    if(a==='call'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,''); if(ph){try{window.location.href='tel:'+ph;}catch(_){}} await api('/api/leads/'+id+'/call','POST',{}); state.toastMsg='📞 Dialer khul raha hai'+(l?' — '+l.name:'')+'…'; return refresh(); }
-    if(a==='wa'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/\D/g,''); if(ph){try{window.open('https://wa.me/'+ph+'?text='+encodeURIComponent('Hi '+(l?l.name.split(' ')[0]:'')),'_blank');}catch(_){}} await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='🟢 WhatsApp khul raha hai…'; return refresh(); }
-    if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 Miss → '+(r.steps||[]).join(' + ')+'. Lead close nahi hui.'; return refresh(); }
-    if(a==='addnote'){ const v=gv('noteBox'); if(v){ await api('/api/leads/'+id+'/activity','POST',{title:'📝 Note',sub:v}); state.toastMsg='Note save ho gaya'; return refresh(); } return; }
+    if(a==='call'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,''); if(ph){try{window.location.href='tel:'+ph;}catch(_){}} await api('/api/leads/'+id+'/call','POST',{}); state.toastMsg='📞 Opening dialer'+(l?' — '+l.name:'')+'…'; return refresh(); }
+    if(a==='wa'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/\D/g,''); if(ph){try{window.open('https://wa.me/'+ph+'?text='+encodeURIComponent('Hi '+(l?l.name.split(' ')[0]:'')),'_blank');}catch(_){}} await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='🟢 Opening WhatsApp…'; return refresh(); }
+    if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 No answer → '+(r.steps||[]).join(' + ')+'. Lead kept open.'; return refresh(); }
+    if(a==='addnote'){ const v=gv('noteBox'); if(v){ await api('/api/leads/'+id+'/activity','POST',{title:'📝 Note',sub:v}); state.toastMsg='Note saved'; return refresh(); } return; }
     return;
   }
   const drill=e.target.closest('[data-drill],[data-drillowner]');
   if(drill){ const d=drill.dataset;
-    state.filters={q:'',status:d.fstatus||d.drillstatus||'',source:d.fsource||'',owner:d.fowner||d.drillowner||'',product:d.fproduct||'',open:d.fopen||''};
+    state.filters={q:'',status:d.fstatus||d.drillstatus||'',source:d.fsource||'',owner:d.fowner||d.drillowner||'',product:d.fproduct||'',open:d.fopen||'',overdue:d.foverdue||''};
     return go('leads'); }
   const lead=e.target.closest('[data-lead]');
   if(lead && !e.target.closest('[data-action]')){ return go('lead',{id:lead.dataset.lead}); }
@@ -905,9 +966,9 @@ document.addEventListener('change',async function(e){
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
   if(el.id==='demoSel'){ if(el.value){ const pin=el.value; state.pin=pin; render(); return doLogin(pin); } return; }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
-  if(a==='setstatus'){ await api('/api/leads/'+id,'PATCH',{status:el.value}); state.toastMsg=(STATUS[el.value]?.won?'🎉 WON! Customer CRM me push ho gaya.':'Status updated'); return refresh(); }
-  if(a==='setfollow'){ await api('/api/leads/'+id,'PATCH',{next_followup:el.value||null}); state.toastMsg='Reminder set ho gaya'; return refresh(); }
-  if(a==='setowner'){ await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassign ho gaya'; return refresh(); }
+  if(a==='setstatus'){ await api('/api/leads/'+id,'PATCH',{status:el.value}); state.toastMsg=(STATUS[el.value]?.won?'🎉 WON! Pushed to Customer CRM.':'Status updated'); return refresh(); }
+  if(a==='setfollow'){ await api('/api/leads/'+id,'PATCH',{next_followup:el.value||null}); state.toastMsg='Reminder set'; return refresh(); }
+  if(a==='setowner'){ await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
   if(el.id==='fstatus'){ state.filters.status=el.value; return refresh(); }
   if(el.id==='fsource'){ state.filters.source=el.value; return refresh(); }
   if(el.id==='fowner'){ state.filters.owner=el.value; return refresh(); }

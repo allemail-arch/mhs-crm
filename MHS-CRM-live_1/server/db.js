@@ -139,6 +139,16 @@ for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insSet.run(k, String(v));
 for (const col of ['deleted INTEGER DEFAULT 0', 'deleted_by TEXT', 'deleted_at TEXT']) {
   try { db.exec('ALTER TABLE leads ADD COLUMN ' + col); } catch (e) {}
 }
+// migrate any Hinglish connector description to English (existing DBs)
+try { db.prepare("UPDATE connectors SET descr='Lead from any app (webhook)' WHERE key='Other' AND descr LIKE '%Kisi bhi%'").run(); } catch (e) {}
+// normalized phone column for phone-based dedupe (one phone = one lead)
+try { db.exec('ALTER TABLE leads ADD COLUMN phone_norm TEXT'); } catch (e) {}
+try {
+  const rows = db.prepare("SELECT id, phone FROM leads WHERE (phone_norm IS NULL OR phone_norm='') AND phone IS NOT NULL AND phone<>''").all();
+  const upd = db.prepare('UPDATE leads SET phone_norm=? WHERE id=?');
+  for (const r of rows) { const n = String(r.phone || '').replace(/\D/g, '').slice(-10); if (n) upd.run(n, r.id); }
+} catch (e) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_leads_phonenorm ON leads(phone_norm)'); } catch (e) {}
 
 /* ---------- helpers ---------- */
 function hashPin(pin, salt) {

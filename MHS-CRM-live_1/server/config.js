@@ -51,7 +51,7 @@ const DEFAULT_CONNECTORS = [
   { key: 'Calendly', name: 'Calendly',                              src: 'Calendly', desc: 'Demo / booking calls',           icon: 'C',  color: '#006bff', connected: 0, team: 'TFD' },
   { key: 'WhatsApp', name: 'WhatsApp Business API',                 src: 'WhatsApp', desc: 'WA incoming + auto-reply',        icon: 'wa', color: '#25d366', connected: 0, team: 'MHS' },
   { key: 'Landing',  name: 'Landing Pages',                         src: 'Website',  desc: 'Campaign landing pages',          icon: 'L',  color: '#7c5cff', connected: 0, team: 'TPA' },
-  { key: 'Other',    name: 'Other Apps — Webhook / Zapier',         src: 'Manual',   desc: 'Kisi bhi app se lead (webhook)',  icon: '+',  color: '#6b7488', connected: 0, team: 'TFD' },
+  { key: 'Other',    name: 'Other Apps — Webhook / Zapier',         src: 'Manual',   desc: 'Lead from any app (webhook)',     icon: '+',  color: '#6b7488', connected: 0, team: 'TFD' },
 ];
 
 // Editable settings (Admin → Settings). Targets are per-agent per-vertical.

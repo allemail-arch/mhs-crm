@@ -96,12 +96,22 @@ const autoOn = (key) => { const r = db.prepare('SELECT enabled FROM automation W
 
 function connectorForSource(src) { return db.prepare('SELECT * FROM connectors WHERE src=? ORDER BY connected DESC LIMIT 1').get(src); }
 
+function normPhone(p) { return String(p == null ? '' : p).replace(/\D/g, '').slice(-10); }
+function findLeadByPhone(phone) {
+  const norm = normPhone(phone);
+  if (norm.length < 7) return null;
+  return db.prepare("SELECT * FROM leads WHERE deleted=0 AND phone_norm=? ORDER BY created_at DESC").get(norm) || null;
+}
 function createLead(data, byName, opts = {}) {
   // dedupe by external_id
   if (data.external_id) {
     const ex = db.prepare('SELECT * FROM leads WHERE external_id=?').get(data.external_id);
     if (ex) return { lead: ex, deduped: true };
   }
+  // dedupe by phone number — one phone = one lead (unique identity)
+  const dupPhone = findLeadByPhone(data.phone);
+  if (dupPhone) return { lead: dupPhone, deduped: true };
+  const phoneNorm = normPhone(data.phone);
   const source = data.source || 'Manual';
   const conn = connectorForSource(source);
   const product = data.product || (conn ? conn.team : 'MHS');
@@ -114,9 +124,9 @@ function createLead(data, byName, opts = {}) {
   const id = data.id || ('L' + uid('').slice(0, 8));
   const followup = autoOn('autoFollowup') ? addDays(1) : null;
   const score = data.score ?? (['Website', 'WhatsApp', 'Calendly'].includes(source) ? 70 : 55);
-  db.prepare(`INSERT INTO leads(id,name,phone,email,city,product,source,status,owner_id,website,score,converted,next_followup,external_id)
-              VALUES(?,?,?,?,?,?,?, 'Fresh', ?,?,?,0,?,?)`)
-    .run(id, data.name || 'Unknown', data.phone || '', data.email || '', data.city || '', product, source, ownerId, data.website || '', score, followup, data.external_id || null);
+  db.prepare(`INSERT INTO leads(id,name,phone,phone_norm,email,city,product,source,status,owner_id,website,score,converted,next_followup,external_id)
+              VALUES(?,?,?,?,?,?,?,?, 'Fresh', ?,?,?,0,?,?)`)
+    .run(id, data.name || 'Unknown', data.phone || '', phoneNorm || null, data.email || '', data.city || '', product, source, ownerId, data.website || '', score, followup, data.external_id || null);
   logAct(id, 'Lead created', 'Source: ' + source, byName || 'System');
   if (assignNote) logAct(id, '🔁 ' + assignNote, '', 'System');
   return { lead: leadRow(id), deduped: false };
@@ -151,17 +161,17 @@ async function applyStatusChange(lead, newStatus, byName) {
 }
 
 async function handleMiss(lead, byName) {
-  logAct(lead.id, '📵 Call — No answer', 'Ghanti gayi, koi response nahi', byName);
+  logAct(lead.id, '📵 Call — No answer', 'Rang out, no response', byName);
   const steps = [];
   if (autoOn('autoWaOnMiss')) {
-    const msg = `Hi ${String(lead.name).split(' ')[0]}, humne aapko call kiya tha. Aap kab available ho?`;
+    const msg = `Hi ${String(lead.name).split(' ')[0]}, we tried calling you. When are you available?`;
     const r = await sendWhatsApp(lead.phone, msg);
     logAct(lead.id, '🟢 Auto WhatsApp ' + (r.sent ? 'sent' : '(simulated)'), '"' + msg + '"', 'System');
     steps.push('WhatsApp');
   }
   if (autoOn('autoRnrOnMiss')) {
     db.prepare("UPDATE leads SET status='RNR', next_followup=?, updated_at=datetime('now') WHERE id=?").run(addDays(1), lead.id);
-    logAct(lead.id, '↪️ Auto status → RNR', 'Kal ka reminder set', 'System');
+    logAct(lead.id, '↪️ Auto status → RNR', 'Reminder set for tomorrow', 'System');
     steps.push('RNR + reminder');
   }
   return steps;
@@ -372,7 +382,7 @@ const server = http.createServer(async (req, res) => {
       const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
       const now = Date.now();
       const rec = loginFails.get(ip) || { fails: 0, until: 0 };
-      if (rec.until > now) return err(res, 429, 'Bahut galat PIN. ' + Math.ceil((rec.until - now) / 1000) + 's baad try karo.');
+      if (rec.until > now) return err(res, 429, 'Too many wrong PINs. Try again in ' + Math.ceil((rec.until - now) / 1000) + 's.');
       const { pin } = await readBody(req);
       if (!pin) return err(res, 400, 'pin required');
       const users = db.prepare('SELECT * FROM users WHERE active=1').all();
@@ -381,7 +391,7 @@ const server = http.createServer(async (req, res) => {
         rec.fails++;
         if (rec.fails >= LOGIN_MAX_FAILS) { rec.until = now + LOGIN_LOCK_MS; rec.fails = 0; }
         loginFails.set(ip, rec);
-        return err(res, 401, 'Galat PIN');
+        return err(res, 401, 'Wrong PIN');
       }
       loginFails.delete(ip);
       try { db.prepare('INSERT INTO logins(user_id) VALUES(?)').run(u.id); } catch (e) {}
@@ -461,6 +471,7 @@ const server = http.createServer(async (req, res) => {
         if (q.get('owner')) { where += ' AND owner_id=?'; args.push(q.get('owner')); }
         if (q.get('product')) { where += ' AND product=?'; args.push(q.get('product')); }
         if (q.get('open')) { where += " AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
+        if (q.get('overdue')) { where += " AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
         if (q.get('q')) { where += ' AND (name LIKE ? OR phone LIKE ? OR city LIKE ? OR email LIKE ?)'; const t = '%' + q.get('q') + '%'; args.push(t, t, t, t); }
         const rows = db.prepare(`SELECT * FROM leads WHERE ${where} ORDER BY created_at DESC`).all(...args);
         return send(res, 200, { leads: rows.map(r => leadJSON(r)) });
@@ -469,7 +480,8 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         if (!b.name) return err(res, 400, 'name required');
         const autoAssign = b.owner_id === 'auto' || !b.owner_id;
-        const { lead } = createLead({ ...b, owner_id: autoAssign ? null : b.owner_id }, user.name, { autoAssign });
+        const { lead, deduped } = createLead({ ...b, owner_id: autoAssign ? null : b.owner_id }, user.name, { autoAssign });
+        if (deduped) { const o = userById(lead.owner_id); return send(res, 200, { duplicate: true, owner_name: o ? o.name : '—', lead: leadJSON(lead, true) }); }
         return send(res, 200, { ok: true, lead: leadJSON(lead, true) });
       }
       // bulk import (Excel/CSV) → each lead round-robin auto-assigned
@@ -478,19 +490,20 @@ const server = http.createServer(async (req, res) => {
         const list = Array.isArray(b.leads) ? b.leads : [];
         if (!list.length) return err(res, 400, 'no leads to import');
         if (list.length > 5000) return err(res, 400, 'max 5000 leads per import');
-        let created = 0, skipped = 0; const byAgent = {};
+        let created = 0, skipped = 0, duplicates = 0; const byAgent = {};
         for (const row of list) {
           if (!row || !String(row.name || '').trim()) { skipped++; continue; }
-          const { lead } = createLead({
+          const { lead, deduped } = createLead({
             name: row.name, phone: row.phone, email: row.email, city: row.city,
             product: row.product, source: row.source || 'Bulk Upload',
             owner_id: row.owner_id || null,
           }, user.name + ' (import)', { autoAssign: true });
+          if (deduped) { duplicates++; continue; }
           created++;
           const on = userById(lead.owner_id)?.name || '—';
           byAgent[on] = (byAgent[on] || 0) + 1;
         }
-        return send(res, 200, { ok: true, created, skipped, byAgent });
+        return send(res, 200, { ok: true, created, skipped, duplicates, byAgent });
       }
       // global search — find any lead + who owns it (available to all roles)
       if (p === '/api/leads/search' && m === 'GET') {
