@@ -173,12 +173,24 @@ function scopeSql(user) {
   if (user.role === 'lead') return { where: "owner_id IN (SELECT id FROM users WHERE team=?)", args: [user.team] };
   return { where: 'owner_id=?', args: [user.id] };
 }
-function reportSummary(user, from, to) {
+// unified lead filter: role scope + date/source/department/employee
+function leadWhere(user, f) {
+  f = f || {};
   const s = scopeSql(user);
   let where = s.where, args = [...s.args];
-  if (from) { where += " AND date(created_at) >= date(?)"; args.push(from); }
-  if (to) { where += " AND date(created_at) <= date(?)"; args.push(to); }
-  const rows = db.prepare(`SELECT status, source FROM leads WHERE ${where}`).all(...args);
+  if (f.from) { where += " AND date(created_at) >= date(?)"; args.push(f.from); }
+  if (f.to) { where += " AND date(created_at) <= date(?)"; args.push(f.to); }
+  if (f.source) { where += " AND source=?"; args.push(f.source); }
+  if (f.owner) { where += " AND owner_id=?"; args.push(f.owner); }
+  if (f.department) { where += " AND owner_id IN (SELECT id FROM users WHERE department=?)"; args.push(f.department); }
+  return { where, args };
+}
+function getDepartments() {
+  return db.prepare("SELECT DISTINCT department d FROM users WHERE department IS NOT NULL AND department<>'' ORDER BY department").all().map(r => r.d);
+}
+function reportSummary(user, f) {
+  const w = leadWhere(user, f);
+  const rows = db.prepare(`SELECT status, source FROM leads WHERE ${w.where}`).all(...w.args);
   const total = rows.length;
   const won = rows.filter(r => cfg.STATUS[r.status]?.won).length;
   const open = rows.filter(r => cfg.STATUS[r.status]?.open).length;
@@ -187,19 +199,29 @@ function reportSummary(user, from, to) {
   const funnel = cfg.STATUS_LIST.map(st => ({ st, n: rows.filter(r => r.status === st).length }));
   return { total, won, open, interested, conv: total ? Math.round(won / total * 100) : 0, bySource, funnel };
 }
-function reportAgents(user) {
+function reportAgents(user, f) {
+  f = f || {};
   const teamFilter = user.role === 'admin' ? '' : user.team;
-  const sales = activeSales(teamFilter);
+  let sales = activeSales(teamFilter);
+  if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const cols = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   return sales.map(u => {
-    const rows = db.prepare('SELECT status FROM leads WHERE owner_id=?').all(u.id);
+    let w = 'owner_id=?', a = [u.id];
+    if (f.from) { w += " AND date(created_at)>=date(?)"; a.push(f.from); }
+    if (f.to) { w += " AND date(created_at)<=date(?)"; a.push(f.to); }
+    if (f.source) { w += " AND source=?"; a.push(f.source); }
+    const rows = db.prepare('SELECT status FROM leads WHERE ' + w).all(...a);
     const counts = {}; cols.forEach(c => counts[c] = rows.filter(r => r.status === c).length);
-    return { id: u.id, name: u.name, email: u.email, team: u.team, total: rows.length, counts };
+    return { id: u.id, name: u.name, email: u.email, team: u.team, department: u.department, total: rows.length, counts };
   });
 }
-function reportActivity(user) {
+function reportActivity(user, f) {
+  f = f || {};
   const teamFilter = user.role === 'admin' ? '' : user.team;
-  const sales = activeSales(teamFilter);
+  let sales = activeSales(teamFilter);
+  if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.owner) sales = sales.filter(u => u.id === f.owner);
   // connected calls today + talk time, per owner (from the calls table)
   const rows = db.prepare(`SELECT owner_id oid, COUNT(*) c, SUM(talktime) t FROM calls
       WHERE connected=1 AND date(created_at)=date('now') GROUP BY owner_id`).all();
@@ -217,9 +239,12 @@ function reportActivity(user) {
   });
 }
 // per-user + per-team missed / today-due follow-ups
-function reportFollowups(user) {
+function reportFollowups(user, f) {
+  f = f || {};
   const teamFilter = user.role === 'admin' ? '' : user.team;
-  const sales = activeSales(teamFilter);
+  let sales = activeSales(teamFilter);
+  if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const per = sales.map(u => {
     const missed = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
@@ -444,10 +469,14 @@ const server = http.createServer(async (req, res) => {
       }
 
       // reports
-      if (p === '/api/reports/summary' && m === 'GET') return send(res, 200, reportSummary(user, url.searchParams.get('from'), url.searchParams.get('to')));
-      if (p === '/api/reports/agents' && m === 'GET') return send(res, 200, { agents: reportAgents(user) });
-      if (p === '/api/reports/activity' && m === 'GET') return send(res, 200, { activity: reportActivity(user) });
-      if (p === '/api/reports/followups' && m === 'GET') return send(res, 200, reportFollowups(user));
+      if (p.startsWith('/api/reports/') && m === 'GET') {
+        const q = url.searchParams;
+        const f = { from: q.get('from'), to: q.get('to'), source: q.get('source'), department: q.get('department'), owner: q.get('owner') };
+        if (p === '/api/reports/summary') return send(res, 200, reportSummary(user, f));
+        if (p === '/api/reports/agents') return send(res, 200, { agents: reportAgents(user, f) });
+        if (p === '/api/reports/activity') return send(res, 200, { activity: reportActivity(user, f) });
+        if (p === '/api/reports/followups') return send(res, 200, reportFollowups(user, f));
+      }
 
       // connectors
       if (p === '/api/connectors' && m === 'GET') {
@@ -503,7 +532,7 @@ function publicConfig() {
   const teams = getTeams();
   const at = getAgentTarget();
   return { teams, products: Object.keys(teams), sources: getSources(), statuses: cfg.STATUS_LIST,
-    teamTarget: at, agentTarget: at };
+    departments: getDepartments(), teamTarget: at, agentTarget: at };
 }
 
 // auto-seed on first boot (fresh deploy) so the app is usable immediately

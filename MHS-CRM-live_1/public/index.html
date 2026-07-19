@@ -196,7 +196,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
-  filters:{q:'',status:'',source:'',owner:''}, dateFilter:{from:'',to:''}, toastMsg:'', busy:false };
+  filters:{q:'',status:'',source:'',owner:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''}, toastMsg:'', busy:false };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -226,10 +226,12 @@ async function api(path,method='GET',body){
 async function loadRouteData(){
   const r=state.route, role=state.user.role;
   if(r==='dashboard'){
-    const df=state.dateFilter; const qs=[]; if(df.from)qs.push('from='+df.from); if(df.to)qs.push('to='+df.to);
-    state.reports.summary=await api('/api/reports/summary'+(qs.length?'?'+qs.join('&'):''));
+    const f=state.dashFilter; const qs=new URLSearchParams();
+    ['from','to','source','department','owner'].forEach(k=>{ if(f[k]) qs.set(k,f[k]); });
+    const q=qs.toString()?'?'+qs.toString():'';
+    state.reports.summary=await api('/api/reports/summary'+q);
     if(role==='sales'){ state.leads=(await api('/api/leads')).leads; }
-    else { state.reports.agents=(await api('/api/reports/agents')).agents; state.reports.activity=(await api('/api/reports/activity')).activity; }
+    else { state.reports.agents=(await api('/api/reports/agents'+q)).agents; state.reports.activity=(await api('/api/reports/activity'+q)).activity; }
   } else if(r==='leads'||r==='myleads'){
     const q=new URLSearchParams(); const f=state.filters;
     if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner);
@@ -429,10 +431,18 @@ function renderDashboard(){
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
   const title=state.user.role==='lead'?'Team Report — '+teamName(state.user.team):'Admin Dashboard';
-  const df=state.dateFilter;
-  const dateBar=`<div class="filters"><span class="lead-sub" style="font-weight:700">📅 Date range:</span>
-    <input type="date" id="dfrom" value="${esc(df.from)}"> <span>→</span> <input type="date" id="dto" value="${esc(df.to)}">
-    <button class="btn sm" data-action="applydate">Apply</button>${(df.from||df.to)?' <button class="btn ghost sm" data-action="cleardate">Clear</button>':''}</div>`;
+  const f=state.dashFilter;
+  const srcOpt=srcList().map(s=>`<option value="${s}" ${f.source===s?'selected':''}>${s}</option>`).join('');
+  const depOpt=(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.department===d?'selected':''}>${esc(d)}</option>`).join('');
+  const empOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
+  const active=f.from||f.to||f.source||f.department||f.owner;
+  const dateBar=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px">
+    <span class="lead-sub" style="font-weight:700">📅 From</span><input type="date" id="dfrom" value="${esc(f.from)}">
+    <span class="lead-sub" style="font-weight:700">To</span><input type="date" id="dto" value="${esc(f.to)}">
+    <select id="dsource"><option value="">All Sources</option>${srcOpt}</select>
+    <select id="ddept"><option value="">All Departments</option>${depOpt}</select>
+    <select id="downer"><option value="">All Employees</option>${empOpt}</select>
+    <button class="btn sm" data-action="applydash">Apply Filter</button>${active?' <button class="btn ghost sm" data-action="cleardash">Clear</button>':''}</div>`;
   return `<div class="page-h"><h2>${title}</h2></div>${dateBar}${junkAlert}${kpis}
     <div class="page-h" style="margin-top:6px"><h2 style="font-size:15px">🎯 Targets</h2></div>
     <div class="kpis">${teamCards}</div>${activityPanel}
@@ -744,8 +754,9 @@ document.addEventListener('click',async function(e){
       const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source add ho gaya: '+name; return refresh(); }
     if(a==='savesettings'){ await api('/api/settings','PATCH',{target_leads:+gv('st_leads'),target_interested:+gv('st_int'),target_closed:+gv('st_closed')});
       const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets save ho gaye ✓'; return refresh(); }
-    if(a==='applydate'){ state.dateFilter={from:gv('dfrom'),to:gv('dto')}; return refresh(); }
-    if(a==='cleardate'){ state.dateFilter={from:'',to:''}; return refresh(); }
+    if(a==='applydash'){ const val=id=>{const e=document.getElementById(id);return e?e.value:'';};
+      state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer')}; return refresh(); }
+    if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:''}; return refresh(); }
     if(a==='email'){ await api('/api/leads/'+id+'/email','POST',{}); const mail=act.dataset.mail; if(mail&&mail!=='-'&&mail!=='—'&&mail.includes('@')){try{window.open('mailto:'+mail);}catch(_){}} state.toastMsg='✉️ Email compose/sent (email setup ke baad real jaayega)'; return refresh(); }
     if(a==='closemodal'){ return closeModal(); }
     if(a==='savelead'){
