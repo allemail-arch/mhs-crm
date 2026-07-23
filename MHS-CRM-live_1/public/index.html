@@ -16,6 +16,9 @@
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
     background:var(--bg);color:var(--text);font-size:14px;line-height:1.45}
   button{font-family:inherit;cursor:pointer;border:none;background:none}
+  [data-action],[data-nav],[data-drill],[data-drillowner],[data-lead],[data-uid],[data-key],[data-tab],[data-fproduct],[data-fowner]{cursor:pointer}
+  .topnav a,.botnav a,select,label[for],.x{cursor:pointer}
+  input[type=checkbox]{cursor:pointer;width:16px;height:16px}
   input,select,textarea{font-family:inherit;font-size:14px}
   a{color:var(--blue);text-decoration:none}
   .hidden{display:none !important}
@@ -205,6 +208,12 @@ const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
 const teamCode=k=>CFG().teams[k]?.code||k;
 const salesUsers=()=>state.users.filter(u=>u.role==='sales');
+/* agents the current user may assign leads to: admin=all; TL=their managed agents (fallback team) */
+function assignableAgents(){
+  const u=state.user; if(!u) return salesUsers();
+  if(u.role==='lead'){ const mine=salesUsers().filter(x=>x.manager_id===u.id); return mine.length?mine:salesUsers().filter(x=>x.team===u.team); }
+  return salesUsers();
+}
 const userById=id=>state.users.find(u=>u.id===id);
 const initials=n=>String(n||'').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
 /* escape ALL user-provided text before putting it in innerHTML (prevents XSS) */
@@ -282,6 +291,19 @@ function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
   if(fmt==='pdf') downloadPDF(r.name+'.pdf', r.title, r.tables, r.sheets);
   else downloadXLSX(r.name+'.xlsx', r.sheets); }
 function dlButtons(kind){ return `<button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="xlsx">⬇ Excel</button> <button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="pdf">⬇ PDF</button>`; }
+/* selected lead ids for bulk actions on the leads list */
+let selLeads={};
+const LEADS_HEAD=['Name','Phone','Email','City','Product','Source','Status','Owner','Follow-up','Created'];
+function leadRowArr(l){ return [l.name,l.phone||'',l.email||'',l.city||'',l.product||'',l.source||'',l.status,l.owner_name||'',l.next_followup||'',(l.created_at||'').slice(0,10)]; }
+function exportLeads(fmt){ const ls=state.leads||[]; if(!ls.length){ state.toastMsg='No leads to download'; return render(); }
+  const body=ls.map(leadRowArr); const name='leads-'+todayStr();
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Leads ('+ls.length+')',[{head:LEADS_HEAD,body}],[{name:'Leads',rows:[LEADS_HEAD,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'Leads',rows:[LEADS_HEAD,...body]}]); }
+function exportLeadsByAgent(){ const ls=state.leads||[]; if(!ls.length){ state.toastMsg='No leads to download'; return render(); }
+  const groups={}; ls.forEach(l=>{ const k=l.owner_name||'Unassigned'; (groups[k]=groups[k]||[]).push(l); });
+  const sheets=[{name:'All',rows:[LEADS_HEAD,...ls.map(leadRowArr)]}];
+  Object.keys(groups).sort().forEach(k=>sheets.push({name:k,rows:[LEADS_HEAD,...groups[k].map(leadRowArr)]}));
+  downloadXLSX('leads-by-agent-'+todayStr()+'.xlsx',sheets); }
 
 /* ---------------- API ---------------- */
 async function api(path,method='GET',body){
@@ -500,7 +522,7 @@ function renderDashboard(){
       <div><div class="lead-nm">${esc(a.name)}</div><div class="lead-sub">${teamCode(a.team)}</div></div></div></td>
       <td>${a.working?'<span class="badge b-interested">Working</span>':'<span class="badge b-junk">Idle</span>'}</td>
       <td class="num">${a.callsToday}</td>
-      <td class="num">${fmtDur(a.talktime)}</td>
+      <td class="num">${a.callsToday?(a.talktime?fmtDur(a.talktime):'0s'):'—'}</td>
       <td class="num" ${respFlag}>${a.avgRespMin!=null?a.avgRespMin+' min':'—'}</td>
       <td class="num" ${a.junk>=3?'style="color:var(--red);font-weight:700"':''}>${a.junk}</td></tr>`;}).join('');
   const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — who is working
@@ -565,24 +587,36 @@ function filterBar(showOwner){
 function renderLeads(mineOnly){
   const showOwner=state.user.role!=='sales';
   const ls=state.leads.slice().sort((a,b)=>(STATUS[b.status]?.open-STATUS[a.status]?.open)||(parseD(b.created_at)-parseD(a.created_at)));
+  // prune stale selections
+  const idSet={}; ls.forEach(l=>idSet[l.id]=1); Object.keys(selLeads).forEach(id=>{ if(!idSet[id]) delete selLeads[id]; });
   const title=mineOnly?'My Leads':state.user.role==='lead'?'Team Leads':'All Leads';
   const rows=ls.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
-    return `<tr data-lead="${l.id}"><td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
+    return `<tr data-lead="${l.id}"><td data-action="pick" style="width:34px;text-align:center"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></td>
+      <td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
       <td>${srcChip(l.source)}</td><td><span class="pill">${esc(l.product)}</span></td><td>${badge(l.status)}</td>
       <td>${showOwner?esc(l.owner_name):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
-  const table=`<div class="table-wrap"><table><thead><tr><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
+  const allChecked=ls.length&&ls.every(l=>selLeads[l.id]);
+  const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
     <th>${showOwner?'Owner':'Follow-up'}</th>${showOwner?'<th>Follow-up</th>':''}</tr></thead>
-    <tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
+    <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
   const cards=ls.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
-    return `<div class="lcard" data-lead="${l.id}"><div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div>${badge(l.status)}</div>
+    return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
       <div class="row">${srcChip(l.source)}<span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
       <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
         <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
         <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
   const importBtn = `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>`;
+  const selN=Object.keys(selLeads).length;
+  const tools=`<div class="filters" style="gap:8px;margin-bottom:10px">
+    <button class="btn ghost sm" data-action="dl-leads" data-fmt="xlsx">⬇ Excel</button>
+    <button class="btn ghost sm" data-action="dl-leads" data-fmt="pdf">⬇ PDF</button>
+    <button class="btn ghost sm" data-action="dl-leads-agent">⬇ Agent-wise (Excel)</button>
+    <div class="spacer"></div>
+    <span class="lead-sub" id="selCount">${selN?selN+' selected':''}</span>
+    <button class="btn sm" style="background:var(--red);${selN?'':'display:none'}" id="bulkDelBtn" data-action="bulkdelete">🗑️ Delete selected</button></div>`;
   return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
-    ${filterBar(showOwner)}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
+    ${filterBar(showOwner)}${tools}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
 }
 
 /* ---------------- FOLLOW-UPS ---------------- */
@@ -827,9 +861,13 @@ function renderSearch(){
 function renderLeadDetail(){
   const l=state.currentLead; if(!l) return renderLeads(false);
   const tier=scoreTier(l.score);
-  const stOpt=STATUS_LIST.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
-  const ownOpt=salesUsers().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${u.name}</option>`).join('');
+  const isSales=state.user.role==='sales';
+  // sales cannot set Fresh (keep it only if it's the current status, for correct display)
+  const stList=STATUS_LIST.filter(s=>!(isSales && s==='Fresh' && l.status!=='Fresh'));
+  const stOpt=stList.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
+  const ownOpt=assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${u.name}</option>`).join('');
   const fuVal=l.next_followup||'';
+  const showReminder=STATUS[l.status]?.open;  // hide reminder date for closed statuses (Not Interested, Junk, Closed)
   const canReassign=state.user.role!=='sales';
   const timeline=(l.activities||[]).slice().reverse().map(a=>`<li><div class="tt">${esc(a.title)}</div>
     <div class="tm">${fmtDateTime(a.created_at)} • ${esc(a.by_name)}${a.sub?' • '+esc(a.sub):''}</div></li>`).join('');
@@ -842,7 +880,7 @@ function renderLeadDetail(){
         <span class="badge" style="background:${tier.c}20;color:${tier.c}">${tier.t} • score ${l.score}</span>${wonBadge}</div></div></div>
     <div class="ld-contact"><span>📞 <b>${esc(l.phone)}</b></span><span>✉️ <b>${esc(l.email)}</b></span><span>📍 <b>${esc(l.city)}</b></span>
       <span>🌐 <b>${esc(l.website||'—')}</b></span><span>👤 Owner: <b>${esc(l.owner_name)}</b></span><span>🗓️ Created: <b>${fmtDate(l.created_at)}</b></span></div>
-    <div class="ld-actions"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call now</button>
+    <div class="ld-actions"><button class="btn" data-action="callnow" data-lead="${l.id}">📞 Call now</button>
       <button class="btn ghost" data-action="miss" data-lead="${l.id}">📵 No answer (auto WA + RNR)</button>
       <button class="btn" style="background:#25d366" data-action="wa" data-lead="${l.id}">🟢 WhatsApp</button>
       <button class="btn" style="background:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️ Email</button>
@@ -850,7 +888,7 @@ function renderLeadDetail(){
   <div class="grid2">
     <div class="panel"><div class="panel-h">Update</div><div class="panel-b">
       <div class="field"><label>Status</label><select data-action="setstatus" data-lead="${l.id}">${stOpt}</select></div>
-      <div class="field"><label>Next follow-up (reminder)</label><input type="date" value="${fuVal}" data-action="setfollow" data-lead="${l.id}"></div>
+      ${showReminder?`<div class="field"><label>Next follow-up (reminder)</label><input type="date" value="${fuVal}" data-action="setfollow" data-lead="${l.id}"></div>`:''}
       ${canReassign?`<div class="field"><label>Assign to (owner)</label><select data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
       <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Write a call summary…"></textarea></div>
       <button class="btn block" data-action="addnote" data-lead="${l.id}">Save note</button></div></div>
@@ -863,7 +901,7 @@ function openModal(html){const bg=document.createElement('div');bg.className='mo
 function closeModal(){const m=document.getElementById('modalBg');if(m)m.remove();}
 
 function addLeadModal(){
-  const owOpt='<option value="auto">⚡ Auto — Round Robin (recommended)</option>'+salesUsers().map(u=>`<option value="${u.id}">${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
+  const owOpt='<option value="auto">⚡ Auto — Round Robin (recommended)</option>'+assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
   const srOpt=srcList().map(s=>`<option>${s}</option>`).join('');
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add New Lead</h3><span class="x" data-action="closemodal">×</span></div>
@@ -904,6 +942,8 @@ function editUserModal(uid){
   const u=state.users.find(x=>x.id===uid); if(!u)return;
   const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}" ${u.team===k?'selected':''}>${teamName(k)}</option>`).join('');
   const roleOpt=[['sales','Sales'],['lead','Team Lead'],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${r[1]}</option>`).join('');
+  const tls=state.users.filter(x=>x.role==='lead');
+  const mgrOpt='<option value="">— No Team Lead —</option>'+tls.map(x=>`<option value="${x.id}" ${u.manager_id===x.id?'selected':''}>${esc(x.name)} (${teamCode(x.team)})</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>Edit User</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="field"><label>Name</label><input id="eu_name" value="${esc(u.name)}"></div>
@@ -911,6 +951,7 @@ function editUserModal(uid){
       <div class="field"><label>Phone</label><input id="eu_phone" value="${esc(u.phone||'')}" placeholder="+91 …"></div>
       <div class="field"><label>Role</label><select id="eu_role">${roleOpt}</select></div>
       <div class="field"><label>Team / Product</label><select id="eu_team">${teamOpt}</select></div>
+      <div class="field"><label>Reports to (Team Lead) <span class="lead-sub">assign this sales agent to a TL</span></label><select id="eu_mgr">${mgrOpt}</select></div>
       <div class="field"><label>Department</label><input id="eu_dept" value="${esc(u.department||'')}"></div>
       <div class="field"><label>Reset PIN <span class="lead-sub">(leave blank to keep current)</span></label><input id="eu_pin" maxlength="4" placeholder="new 4-digit PIN"></div>
       <button class="btn block" data-action="saveedituser" data-uid="${u.id}">Save changes</button></div></div>`);
@@ -924,6 +965,16 @@ function transferUserModal(uid){
       <div class="lead-sub" style="margin-bottom:10px">Move all of <b>${esc(u.name)}</b>'s <b>${u.leads||0}</b> leads to another agent (use this when someone leaves or goes on leave).</div>
       <div class="field"><label>Transfer to</label><select id="tr_to">${opt}</select></div>
       <button class="btn block" data-action="dotransfer" data-uid="${uid}">Transfer ${u.leads||0} leads</button></div></div>`);
+}
+function callLogModal(id){
+  const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,'');
+  openModal(`<div class="modal"><div class="modal-h"><h3>📞 Call ${esc(l?l.name:'')}</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <a class="btn block" href="tel:${ph}" style="margin-bottom:14px;text-align:center;display:block">📞 Dial ${esc(l?l.phone:'')}</a>
+      <div class="lead-sub" style="margin-bottom:10px">After the call, log how long you talked so Talk Time shows on the dashboard.</div>
+      <div class="field"><label>Connected?</label><select id="cl_conn"><option value="1">Yes — connected</option><option value="0">No answer</option></select></div>
+      <div class="field"><label>Talk time (minutes)</label><input id="cl_min" type="number" min="0" placeholder="e.g. 3"></div>
+      <button class="btn block" data-action="savecall" data-lead="${id}">Save call log</button></div></div>`);
 }
 function reminderModal(id, status){
   const today=todayStr();
@@ -955,7 +1006,7 @@ document.addEventListener('click',async function(e){
     if(a==='edituser'){ return editUserModal(act.dataset.uid); }
     if(a==='transferuser'){ return transferUserModal(act.dataset.uid); }
     if(a==='saveedituser'){ const uid=act.dataset.uid; const name=gv('eu_name'); if(!name){alert('Enter a name');return;}
-      const body={name,email:gv('eu_email'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept')};
+      const body={name,email:gv('eu_email'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept'),manager_id:(document.getElementById('eu_mgr')||{}).value||''};
       const pin=gv('eu_pin'); if(pin){ if(pin.length!==4){alert('PIN must be 4 digits');return;} body.pin=pin; }
       const r=await api('/api/users/'+uid,'PATCH',body); if(r.error){alert(r.error);return;}
       closeModal(); state.toastMsg='User updated ✓'; return refresh(); }
@@ -973,6 +1024,13 @@ document.addEventListener('click',async function(e){
     if(a==='rtab'){ state.reportTab=act.dataset.tab; return render(); }
     if(a==='dosearch'){ state.searchQ=gv('searchBox'); return go('search'); }
     if(a==='dlx'){ return doExport(act.dataset.kind, act.dataset.fmt); }
+    if(a==='dl-leads'){ return exportLeads(act.dataset.fmt); }
+    if(a==='dl-leads-agent'){ return exportLeadsByAgent(); }
+    if(a==='pick'){ return; }
+    if(a==='bulkdelete'){ const ids=Object.keys(selLeads); if(!ids.length){ alert('Select some leads first'); return; }
+      if(confirm('Delete '+ids.length+' selected lead(s)? They will be recorded in the delete report.')){
+        const r=await api('/api/leads/bulk-delete','POST',{ids}); selLeads={};
+        state.toastMsg='🗑️ '+(r.deleted||0)+' leads deleted'; return refresh(); } return; }
     if(a==='rptdate'){ state.reportDate=gv('rptDate'); return refresh(); }
     if(a==='import'){ return importModal(); }
     if(a==='samplecsv'){ return downloadSampleCsv(); }
@@ -1017,6 +1075,10 @@ document.addEventListener('click',async function(e){
       closeModal(); state.toastMsg=name+' added. PIN: '+pin; if(state.route==='users') return refresh(); return; }
     if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
     if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
+    if(a==='callnow'){ return callLogModal(id); }
+    if(a==='savecall'){ const min=Math.max(0,+gv('cl_min')||0); const conn=(document.getElementById('cl_conn')||{}).value||'1';
+      await api('/api/leads/'+id+'/call','POST',{talktime:min*60,connected:+conn}); closeModal();
+      state.toastMsg='📞 Call logged'+(min?' — '+min+' min talk time':''); return refresh(); }
     if(a==='call'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,''); if(ph){try{window.location.href='tel:'+ph;}catch(_){}} await api('/api/leads/'+id+'/call','POST',{}); state.toastMsg='📞 Opening dialer'+(l?' — '+l.name:'')+'…'; return refresh(); }
     if(a==='wa'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/\D/g,''); if(ph){try{window.open('https://wa.me/'+ph+'?text='+encodeURIComponent('Hi '+(l?l.name.split(' ')[0]:'')),'_blank');}catch(_){}} await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='🟢 Opening WhatsApp…'; return refresh(); }
     if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 No answer → '+(r.steps||[]).join(' + ')+'. Lead kept open.'; return refresh(); }
@@ -1031,9 +1093,17 @@ document.addEventListener('click',async function(e){
   if(lead && !e.target.closest('[data-action]')){ return go('lead',{id:lead.dataset.lead}); }
 });
 
+function updateSelUI(){ const n=Object.keys(selLeads).length;
+  const cnt=document.getElementById('selCount'); if(cnt) cnt.textContent=n?n+' selected':'';
+  const btn=document.getElementById('bulkDelBtn'); if(btn) btn.style.display=n?'':'none';
+  document.querySelectorAll('.lead-check').forEach(c=>{ c.checked=!!selLeads[c.dataset.lead]; });
+  const all=document.getElementById('selAll'); if(all){ const ids=[...new Set([...document.querySelectorAll('.lead-check')].map(c=>c.dataset.lead))]; all.checked=ids.length>0&&ids.every(id=>selLeads[id]); }
+}
 document.addEventListener('change',async function(e){
   const el=e.target;
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
+  if(el.classList&&el.classList.contains('lead-check')){ const id=el.dataset.lead; if(el.checked) selLeads[id]=1; else delete selLeads[id]; return updateSelUI(); }
+  if(el.id==='selAll'){ const ids=[...new Set([...document.querySelectorAll('.lead-check')].map(c=>c.dataset.lead))]; ids.forEach(id=>{ if(el.checked) selLeads[id]=1; else delete selLeads[id]; }); return updateSelUI(); }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
   if(a==='setstatus'){ const st=el.value; const l=findLeadLocal(id); const NEEDS=['RNR','Follow Up','Interested'];
     if(NEEDS.includes(st) && !(l&&l.next_followup)){ return reminderModal(id, st); }
@@ -1058,6 +1128,16 @@ document.addEventListener('input',function(e){
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter' && (e.target.id==='globalSearch'||e.target.id==='searchBox')){ state.searchQ=e.target.value.trim(); go('search'); }
 });
+
+/* real-time auto-refresh — re-fetch current page every 20s, but never interrupt typing or open modals */
+setInterval(function(){
+  if(!state.user) return;
+  if(document.getElementById('modalBg')) return;                 // a modal is open
+  const ae=document.activeElement;
+  if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return; // user is entering data
+  if(['lead','settings','connectors'].includes(state.route)) return; // edit-heavy pages
+  refresh();
+}, 20000);
 
 /* boot */
 render();
