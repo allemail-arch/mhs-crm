@@ -180,8 +180,22 @@ async function handleMiss(lead, byName) {
 /* ---------------- reports ---------------- */
 function scopeSql(user) {
   if (user.role === 'admin') return { where: '1=1', args: [] };
-  if (user.role === 'lead') return { where: "owner_id IN (SELECT id FROM users WHERE team=?)", args: [user.team] };
+  // Team Lead sees ONLY the sales agents assigned to them (manager_id). Falls back to whole team if none assigned yet.
+  if (user.role === 'lead') {
+    const assigned = db.prepare("SELECT COUNT(*) n FROM users WHERE role='sales' AND manager_id=?").get(user.id).n;
+    if (assigned > 0) return { where: "owner_id IN (SELECT id FROM users WHERE manager_id=?)", args: [user.id] };
+    return { where: "owner_id IN (SELECT id FROM users WHERE team=?)", args: [user.team] };
+  }
   return { where: 'owner_id=?', args: [user.id] };
+}
+// sales agents visible to a user (admin=all, lead=their assigned agents or team fallback)
+function salesForUser(user) {
+  if (user.role === 'lead') {
+    const mine = db.prepare("SELECT * FROM users WHERE role='sales' AND active=1 AND manager_id=? ORDER BY id").all(user.id);
+    if (mine.length) return mine;
+    return activeSales(user.team);
+  }
+  return activeSales('');
 }
 // unified lead filter: role scope + date/source/department/employee
 function leadWhere(user, f) {
@@ -213,8 +227,7 @@ function reportSummary(user, f) {
 }
 function reportAgents(user, f) {
   f = f || {};
-  const teamFilter = user.role === 'admin' ? '' : user.team;
-  let sales = activeSales(teamFilter);
+  let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const cols = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
@@ -230,8 +243,7 @@ function reportAgents(user, f) {
 }
 function reportActivity(user, f) {
   f = f || {};
-  const teamFilter = user.role === 'admin' ? '' : user.team;
-  let sales = activeSales(teamFilter);
+  let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   // connected calls today + talk time, per owner (from the calls table)
@@ -253,8 +265,7 @@ function reportActivity(user, f) {
 // per-user + per-team missed / today-due follow-ups
 function reportFollowups(user, f) {
   f = f || {};
-  const teamFilter = user.role === 'admin' ? '' : user.team;
-  let sales = activeSales(teamFilter);
+  let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
@@ -285,8 +296,7 @@ function reportLeadsDist(user, f) {
   f = f || {};
   const from = f.from || new Date().toISOString().slice(0, 10);
   const to = f.to || from;
-  const teamFilter = user.role === 'admin' ? '' : user.team;
-  const sales = activeSales(teamFilter);
+  const sales = salesForUser(user);
   const cols = cfg.STATUS_LIST;
   const per = sales.map(u => {
     const rows = db.prepare("SELECT status FROM leads WHERE owner_id=? AND deleted=0 AND date(created_at)>=date(?) AND date(created_at)<=date(?)").all(u.id, from, to);
@@ -446,7 +456,7 @@ const server = http.createServer(async (req, res) => {
 
       // users
       if (p === '/api/users' && m === 'GET') {
-        const rows = db.prepare('SELECT id,name,email,role,team,department,phone,active FROM users ORDER BY role, name').all();
+        const rows = db.prepare('SELECT id,name,email,role,team,department,phone,manager_id,active FROM users ORDER BY role, name').all();
         const withLoad = rows.map(u => ({ ...u, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0').get(u.id).n }));
         return send(res, 200, { users: withLoad });
       }
@@ -478,7 +488,7 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req); const u = db.prepare('SELECT * FROM users WHERE id=?').get(um[1]);
         if (!u) return err(res, 404, 'user not found');
         const sets = [], args = [];
-        for (const f of ['name', 'email', 'role', 'team', 'department', 'phone']) {
+        for (const f of ['name', 'email', 'role', 'team', 'department', 'phone', 'manager_id']) {
           if (b[f] !== undefined) { sets.push(f + '=?'); args.push(b[f] === '' ? null : b[f]); }
         }
         if (b.pin) { const { hash, salt } = hashPin(b.pin); sets.push('pin_hash=?', 'pin_salt=?'); args.push(hash, salt); }
@@ -498,6 +508,24 @@ const server = http.createServer(async (req, res) => {
         db.prepare('DELETE FROM users WHERE id=?').run(u.id);
         db.prepare('UPDATE leads SET owner_id=NULL WHERE owner_id=?').run(u.id);
         return send(res, 200, { ok: true, unassigned: openLeads });
+      }
+
+      // bulk soft-delete leads (mark-all → delete)
+      if (p === '/api/leads/bulk-delete' && m === 'POST') {
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+        if (!ids.length) return err(res, 400, 'no leads selected');
+        let deleted = 0;
+        const del = db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now') WHERE id=? AND deleted=0");
+        const logDel = db.prepare('INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department) VALUES(?,?,?,?,?,?)');
+        for (const id of ids) {
+          const lead = leadRow(id);
+          if (!lead || lead.deleted) continue;
+          del.run(user.id, id);
+          logDel.run(lead.id, lead.name, lead.phone, user.id, user.name, user.department || null);
+          deleted++;
+        }
+        return send(res, 200, { ok: true, deleted });
       }
 
       // leads
@@ -568,6 +596,8 @@ const server = http.createServer(async (req, res) => {
       if (mm && m === 'GET') { const r = leadRow(mm[1]); return r ? send(res, 200, { lead: leadJSON(r, true) }) : err(res, 404, 'not found'); }
       if (mm && m === 'PATCH') {
         const b = await readBody(req); const lead = leadRow(mm[1]); if (!lead) return err(res, 404, 'not found');
+        // sales agents cannot move a lead back to Fresh (admin/lead can)
+        if (b.status === 'Fresh' && user.role === 'sales') return err(res, 403, 'Sales agents cannot set status to Fresh');
         // reminder is mandatory when moving a lead to RNR / Follow Up / Interested
         const REMINDER_STATUSES = ['RNR', 'Follow Up', 'Interested'];
         if (b.status && REMINDER_STATUSES.includes(b.status) && !b.next_followup && !lead.next_followup) {

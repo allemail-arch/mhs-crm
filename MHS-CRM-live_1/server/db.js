@@ -149,6 +149,8 @@ try {
   for (const r of rows) { const n = String(r.phone || '').replace(/\D/g, '').slice(-10); if (n) upd.run(n, r.id); }
 } catch (e) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_leads_phonenorm ON leads(phone_norm)'); } catch (e) {}
+// manager_id: which Team Lead a sales agent reports to (for TL-scoped data)
+try { db.exec('ALTER TABLE users ADD COLUMN manager_id TEXT'); } catch (e) {}
 
 /* ---------- helpers ---------- */
 function hashPin(pin, salt) {
