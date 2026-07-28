@@ -263,6 +263,33 @@ function reportActivity(user, f) {
       avgRespMin: resp ? Math.max(0, Math.round(resp)) : null, junk, working: c.c > 0 };
   });
 }
+// LSQ-style daily report: per agent — calls, connected, durations, pipeline counts, overdue tasks (for a date)
+function reportDaily(user, f) {
+  f = f || {};
+  const date = f.date || new Date().toISOString().slice(0, 10);
+  let sales = salesForUser(user);
+  if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.owner) sales = sales.filter(u => u.id === f.owner);
+  const OPEN = "('Fresh','RNR','Follow Up','Interested')";
+  const rows = sales.map(u => {
+    const call = db.prepare(`SELECT COUNT(*) calls,
+        SUM(CASE WHEN connected=1 THEN 1 ELSE 0 END) conn,
+        SUM(CASE WHEN connected=1 THEN talktime ELSE 0 END) dur
+        FROM calls WHERE owner_id=? AND date(created_at)=date(?)`).get(u.id, date);
+    const st = {};
+    db.prepare("SELECT status, COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 GROUP BY status").all(u.id).forEach(r => st[r.status] = r.n);
+    const totalOpp = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0").get(u.id).n;
+    const overdue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
+    const conn = call.conn || 0, dur = call.dur || 0;
+    return {
+      id: u.id, name: u.name, email: u.email || '', team: u.team,
+      calls: call.calls || 0, connected: conn, duration: dur, avg: conn ? Math.round(dur / conn) : 0,
+      totalOpp, fresh: st['Fresh'] || 0, followup: st['Follow Up'] || 0, interested: st['Interested'] || 0,
+      notInterested: st['Not Interested'] || 0, won: st['Closed Won'] || 0, overdue,
+    };
+  });
+  return { date, rows };
+}
 // per-user + per-team missed / today-due follow-ups
 function reportFollowups(user, f) {
   f = f || {};
@@ -654,7 +681,8 @@ const server = http.createServer(async (req, res) => {
       // reports
       if (p.startsWith('/api/reports/') && m === 'GET') {
         const q = url.searchParams;
-        const f = { from: q.get('from'), to: q.get('to'), source: q.get('source'), department: q.get('department'), owner: q.get('owner') };
+        const f = { from: q.get('from'), to: q.get('to'), source: q.get('source'), department: q.get('department'), owner: q.get('owner'), date: q.get('date') };
+        if (p === '/api/reports/daily') return send(res, 200, reportDaily(user, f));
         if (p === '/api/reports/summary') return send(res, 200, reportSummary(user, f));
         if (p === '/api/reports/agents') return send(res, 200, { agents: reportAgents(user, f) });
         if (p === '/api/reports/activity') return send(res, 200, { activity: reportActivity(user, f) });
