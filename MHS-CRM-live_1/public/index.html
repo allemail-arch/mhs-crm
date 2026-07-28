@@ -202,7 +202,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
-  searchQ:'', searchResults:[], reportTab:'attendance', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
+  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -312,6 +312,15 @@ function exportAgentsReport(fmt){ const ags=(state.reports.agents||[]).slice().s
   const name='opportunity-stage-'+todayStr();
   if(fmt==='pdf') downloadPDF(name+'.pdf','Opportunity Stage Report — by Agent',[{head,body}],[{name:'Report',rows:[head,...body]}]);
   else downloadXLSX(name+'.xlsx',[{name:'Opportunity Stage',rows:[head,...body]}]); }
+function exportDaily(fmt){ const dr=state.reports.daily; if(!dr||!dr.rows.length){ state.toastMsg='No data to download'; return render(); }
+  const rows=dr.rows.slice().sort(byTeamThenName); const durS=s=>s?fmtDur(s):'0s';
+  const head=['Owner name','Email','Team','# Calls','# Connected','Total Call Duration','Avg Call Duration','Total Opp','Fresh Leads','Follow Up','Interested','Not Interested','Won','Overdue Tasks'];
+  const body=rows.map(r=>[r.name,r.email||'',teamCode(r.team),r.calls,r.connected,durS(r.duration),durS(r.avg),r.totalOpp,r.fresh,r.followup,r.interested,r.notInterested,r.won,r.overdue]);
+  const T=rows.reduce((a,r)=>{['calls','connected','duration','totalOpp','fresh','followup','interested','notInterested','won','overdue'].forEach(k=>a[k]=(a[k]||0)+(r[k]||0));return a;},{});
+  body.push(['TOTAL','','',T.calls||0,T.connected||0,durS(T.duration||0),'',T.totalOpp||0,T.fresh||0,T.followup||0,T.interested||0,T.notInterested||0,T.won||0,T.overdue||0]);
+  const name='daily-report-'+dr.date;
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Daily Report — '+dr.date,[{head,body}],[{name:'Daily Report',rows:[head,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'Daily Report',rows:[head,...body]}]); }
 function exportCallingReport(fmt){ const act=state.reports.activity||[]; if(!act.length){ state.toastMsg='No data to download'; return render(); }
   const head=['Agent','Team','Status','Calls Today','Talk Time','Avg Response (min)','Junk'];
   const body=act.map(a=>[a.name,teamCode(a.team),a.working?'Working':'Idle',a.callsToday,(a.callsToday?(a.talktime?fmtDur(a.talktime):'0s'):'—'),(a.avgRespMin!=null?a.avgRespMin:''),a.junk]);
@@ -348,6 +357,7 @@ async function loadRouteData(){
   } else if(r==='settings'){
     state.settings=(await api('/api/settings')).settings;
   } else if(r==='reports'){
+    state.reports.daily=await api('/api/reports/daily'+(state.dailyDate?('?date='+state.dailyDate):''));
     state.reports.attendance=await api('/api/reports/attendance');
     state.reports.leadsDist=await api('/api/reports/leads-distribution'+(state.reportDate?('?from='+state.reportDate+'&to='+state.reportDate):''));
     state.reports.followups=await api('/api/reports/followups');
@@ -864,10 +874,28 @@ function renderReports(){
       <div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Admin</th><th style="text-align:right">TL</th><th style="text-align:right">Sales</th><th style="text-align:right">Total</th></tr></thead><tbody>${uDept}</tbody></table></div>
       <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">All users (combined)</b><table><thead><tr><th>User</th><th>Role</th><th>Department</th><th>Team/Product</th></tr></thead><tbody>${uRows}</tbody></table></div></div></div>`;
 
-  const tab=state.reportTab||'attendance';
-  const tabs=[['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
+  // Daily Report (LSQ-style) — per agent calls + pipeline + overdue, with a Total row
+  const dr=state.reports.daily||{date:todayStr(),rows:[]};
+  const drRows=dr.rows.slice().sort(byTeamThenName);
+  const durS=s=>s?fmtDur(s):'0s';
+  const T={calls:0,connected:0,duration:0,totalOpp:0,fresh:0,followup:0,interested:0,notInterested:0,won:0,overdue:0};
+  let dBody='',dLastTeam='';
+  drRows.forEach(r=>{ Object.keys(T).forEach(k=>T[k]+=(r[k]||0));
+    const teamHdr=r.team!==dLastTeam?`<tr style="background:#fafbff"><td colspan="12" class="grp-td" style="padding:8px 14px">${teamName(r.team)}</td></tr>`:''; dLastTeam=r.team;
+    dBody+=teamHdr+`<tr><td><div class="lead-nm">${esc(r.name)}</div><div class="lead-sub">${esc(r.email||'')}</div></td>
+      <td class="num">${r.calls}</td><td class="num">${r.connected}</td><td class="num">${durS(r.duration)}</td><td class="num">${durS(r.avg)}</td>
+      <td class="num" style="font-weight:700">${r.totalOpp}</td><td class="num">${r.fresh}</td><td class="num">${r.followup}</td><td class="num">${r.interested}</td>
+      <td class="num">${r.notInterested}</td><td class="num">${r.won}</td><td class="num ${r.overdue>0?'overdue':''}">${r.overdue}</td></tr>`;});
+  const totalRow=`<tr style="background:#fff3e0;font-weight:800"><td>TOTAL</td><td class="num">${T.calls}</td><td class="num">${T.connected}</td><td class="num">${durS(T.duration)}</td><td class="num">—</td><td class="num">${T.totalOpp}</td><td class="num">${T.fresh}</td><td class="num">${T.followup}</td><td class="num">${T.interested}</td><td class="num">${T.notInterested}</td><td class="num">${T.won}</td><td class="num">${T.overdue}</td></tr>`;
+  const dailyPanel=`<div class="panel"><div class="panel-h"><div>📅 Daily Report — <b>${esc(dr.date)}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue)</span></div>
+    <span><input type="date" id="dailyDate" value="${esc(state.dailyDate||dr.date||todayStr())}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px"> <button class="btn sm" data-action="dailydate">Apply</button> ${dl2('dl-daily')}</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Owner name</th><th style="text-align:right"># Calls</th><th style="text-align:right"># Connected</th><th style="text-align:right">Total Duration</th><th style="text-align:right">Avg Duration</th><th style="text-align:right">Total Opp</th><th style="text-align:right">Fresh</th><th style="text-align:right">Follow Up</th><th style="text-align:right">Interested</th><th style="text-align:right">Not Interested</th><th style="text-align:right">Won</th><th style="text-align:right">Overdue Tasks</th></tr></thead>
+    <tbody>${dBody||'<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:20px">No agents</td></tr>'}${drRows.length?totalRow:''}</tbody></table></div></div>`;
+
+  const tab=state.reportTab||'daily';
+  const tabs=[['daily','📅 Daily Report'],['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
   const tabBar=`<div class="filters" style="gap:6px;margin-bottom:16px">${tabs.map(t=>`<button class="btn ${tab===t[0]?'':'ghost'} sm" data-action="rtab" data-tab="${t[0]}">${t[1]}</button>`).join('')}</div>`;
-  const panels={attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
+  const panels={daily:dailyPanel,attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
   return `<div class="page-h"><h2>Reports</h2><span class="cnt">click a tab • download as Excel or PDF</span></div>${tabBar}${panels[tab]||attPanel}`;
 }
 
@@ -1070,6 +1098,8 @@ document.addEventListener('click',async function(e){
     if(a==='dl-leads-agent'){ return exportLeadsByAgent(); }
     if(a==='dl-agents'){ return exportAgentsReport(act.dataset.fmt); }
     if(a==='dl-calling'){ return exportCallingReport(act.dataset.fmt); }
+    if(a==='dl-daily'){ return exportDaily(act.dataset.fmt); }
+    if(a==='dailydate'){ state.dailyDate=gv('dailyDate'); return refresh(); }
     if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
     if(a==='pick'){ return; }
     if(a==='pageprev'){ state.leadPage=Math.max(1,(state.leadPage||1)-1); return render(); }
