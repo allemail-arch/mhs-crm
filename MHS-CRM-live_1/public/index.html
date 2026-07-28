@@ -202,7 +202,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
-  searchQ:'', searchResults:[], reportTab:'attendance', toastMsg:'', busy:false };
+  searchQ:'', searchResults:[], reportTab:'attendance', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -304,6 +304,20 @@ function exportLeadsByAgent(){ const ls=state.leads||[]; if(!ls.length){ state.t
   const sheets=[{name:'All',rows:[LEADS_HEAD,...ls.map(leadRowArr)]}];
   Object.keys(groups).sort().forEach(k=>sheets.push({name:k,rows:[LEADS_HEAD,...groups[k].map(leadRowArr)]}));
   downloadXLSX('leads-by-agent-'+todayStr()+'.xlsx',sheets); }
+function dl2(kind){ return `<span><button class="btn ghost sm" data-action="${kind}" data-fmt="xlsx">⬇ Excel</button> <button class="btn ghost sm" data-action="${kind}" data-fmt="pdf">⬇ PDF</button></span>`; }
+function exportAgentsReport(fmt){ const ags=(state.reports.agents||[]).slice().sort(byTeamThenName); if(!ags.length){ state.toastMsg='No data to download'; return render(); }
+  const cols=['Fresh','Follow Up','Interested','Not Interested','Closed Won'];
+  const head=['Team','Owner','Email','Total',...cols];
+  const body=ags.map(u=>[teamName(u.team),u.name,u.email||'',u.total,...cols.map(c=>u.counts[c]||0)]);
+  const name='opportunity-stage-'+todayStr();
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Opportunity Stage Report — by Agent',[{head,body}],[{name:'Report',rows:[head,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'Opportunity Stage',rows:[head,...body]}]); }
+function exportCallingReport(fmt){ const act=state.reports.activity||[]; if(!act.length){ state.toastMsg='No data to download'; return render(); }
+  const head=['Agent','Team','Status','Calls Today','Talk Time','Avg Response (min)','Junk'];
+  const body=act.map(a=>[a.name,teamCode(a.team),a.working?'Working':'Idle',a.callsToday,(a.callsToday?(a.talktime?fmtDur(a.talktime):'0s'):'—'),(a.avgRespMin!=null?a.avgRespMin:''),a.junk]);
+  const name='calling-activity-'+todayStr();
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Calling Activity — per agent',[{head,body}],[{name:'Calling',rows:[head,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'Calling Activity',rows:[head,...body]}]); }
 
 /* ---------------- API ---------------- */
 async function api(path,method='GET',body){
@@ -407,6 +421,7 @@ function renderShell(inner){
       <input id="globalSearch" placeholder="🔍 Search leads — who owns it?" value="${esc(state.searchQ||'')}" style="flex:1;max-width:280px;margin-left:10px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff">
       <div class="spacer"></div>
       ${addBtn}
+      <button class="btn ghost sm" data-action="refreshnow" title="Refresh now">🔄</button>
       <div class="userchip"><div class="avatar">${initials(u.name)}</div>
         <div><div class="nm">${esc(u.name)}</div><div class="rl">${roleLabel}</div></div></div>
       <button class="btn ghost sm" data-action="logout">Logout</button>
@@ -525,8 +540,8 @@ function renderDashboard(){
       <td class="num">${a.callsToday?(a.talktime?fmtDur(a.talktime):'0s'):'—'}</td>
       <td class="num" ${respFlag}>${a.avgRespMin!=null?a.avgRespMin+' min':'—'}</td>
       <td class="num" ${a.junk>=3?'style="color:var(--red);font-weight:700"':''}>${a.junk}</td></tr>`;}).join('');
-  const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Team Activity — who is working
-    <span class="lead-sub">🟢 Working = made a connected call today • ⚪ Idle = no calls today • Calls = connected only • Avg response = from lead arrival to first call</span></div>
+  const activityPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h"><div>Team Activity — who is working
+    <span class="lead-sub" style="font-weight:400">🟢 Working = connected call today • ⚪ Idle = no calls today • Avg response = today's leads</span></div>${dl2('dl-calling')}</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Agent</th><th>Status</th><th style="text-align:right">Calls today</th><th style="text-align:right">Talk time</th><th style="text-align:right">Avg response</th><th style="text-align:right">Junk</th></tr></thead>
     <tbody>${actRows}</tbody></table></div></div>`;
 
@@ -539,7 +554,7 @@ function renderDashboard(){
     const teamCell=u.team!==lastTeam?`<td class="grp-td">${teamName(u.team)}</td>`:'<td></td>'; lastTeam=u.team;
     rows+=`<tr>${teamCell}<td data-drillowner="${u.id}" style="cursor:pointer"><div class="lead-nm" style="color:var(--blue)">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'')}</div></td>
       <td class="num" style="font-weight:800;cursor:pointer;color:var(--blue)" data-drillowner="${u.id}">${u.total}</td>${cells}</tr>`;});
-  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">Opportunity Stage Report — by Agent<span class="lead-sub">click any number/name → those leads open</span></div>
+  const agentPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h"><div>Opportunity Stage Report — by Agent <span class="lead-sub" style="font-weight:400">click any number/name → those leads open</span></div>${dl2('dl-agents')}</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Team</th><th>Owner</th><th style="text-align:right">Total</th>
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
@@ -590,16 +605,21 @@ function renderLeads(mineOnly){
   // prune stale selections
   const idSet={}; ls.forEach(l=>idSet[l.id]=1); Object.keys(selLeads).forEach(id=>{ if(!idSet[id]) delete selLeads[id]; });
   const title=mineOnly?'My Leads':state.user.role==='lead'?'Team Leads':'All Leads';
-  const rows=ls.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
+  // pagination
+  const size=state.leadPageSize||25; const totalPages=Math.max(1,Math.ceil(ls.length/size));
+  const page=Math.min(Math.max(1,state.leadPage||1), totalPages); state.leadPage=page;
+  const start=(page-1)*size; const pageLs=ls.slice(start, start+size);
+  const ownSel=l=>`<select class="rowown" data-lead="${l.id}" data-action="pick" style="max-width:150px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:#fff">${assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}${l.owner_id&&!assignableAgents().some(u=>u.id===l.owner_id)?`<option value="${l.owner_id}" selected>${esc(l.owner_name||'—')}</option>`:''}</select>`;
+  const rows=pageLs.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
     return `<tr data-lead="${l.id}"><td data-action="pick" style="width:34px;text-align:center"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></td>
       <td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
       <td>${srcChip(l.source)}</td><td><span class="pill">${esc(l.product)}</span></td><td>${badge(l.status)}</td>
-      <td>${showOwner?esc(l.owner_name):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
-  const allChecked=ls.length&&ls.every(l=>selLeads[l.id]);
+      <td>${showOwner?ownSel(l):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
+  const allChecked=pageLs.length&&pageLs.every(l=>selLeads[l.id]);
   const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
-    <th>${showOwner?'Owner':'Follow-up'}</th>${showOwner?'<th>Follow-up</th>':''}</tr></thead>
+    <th>${showOwner?'Owner (assign)':'Follow-up'}</th>${showOwner?'<th>Follow-up</th>':''}</tr></thead>
     <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
-  const cards=ls.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
+  const cards=pageLs.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
     return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
       <div class="row">${srcChip(l.source)}<span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
       <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
@@ -608,15 +628,24 @@ function renderLeads(mineOnly){
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
   const importBtn = `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>`;
   const selN=Object.keys(selLeads).length;
-  const tools=`<div class="filters" style="gap:8px;margin-bottom:10px">
+  const tools=`<div class="filters" style="gap:8px;margin-bottom:10px;align-items:center">
     <button class="btn ghost sm" data-action="dl-leads" data-fmt="xlsx">⬇ Excel</button>
     <button class="btn ghost sm" data-action="dl-leads" data-fmt="pdf">⬇ PDF</button>
     <button class="btn ghost sm" data-action="dl-leads-agent">⬇ Agent-wise (Excel)</button>
     <div class="spacer"></div>
     <span class="lead-sub" id="selCount">${selN?selN+' selected':''}</span>
-    <button class="btn sm" style="background:var(--red);${selN?'':'display:none'}" id="bulkDelBtn" data-action="bulkdelete">🗑️ Delete selected</button></div>`;
+    <span id="bulkActions" style="display:${selN?'inline-flex':'none'};gap:8px">
+      <button class="btn sm" data-action="changeowner">🔁 Change Owner</button>
+      <button class="btn sm" data-action="changestage">🏷️ Change Stage</button>
+      <button class="btn sm" style="background:var(--red)" data-action="bulkdelete">🗑️ Delete</button></span></div>`;
+  const pageBar=ls.length>size?`<div class="filters" style="gap:8px;justify-content:flex-end;margin-top:10px">
+    <span class="lead-sub">Rows per page:</span>
+    <select id="pageSize" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${[10,15,25,50,100].map(n=>`<option ${size===n?'selected':''}>${n}</option>`).join('')}</select>
+    <button class="btn ghost sm" data-action="pageprev" ${page<=1?'style="opacity:.4;pointer-events:none"':''}>‹ Prev</button>
+    <span class="lead-sub">Page ${page} / ${totalPages} <span style="color:var(--muted)">(showing ${start+1}–${Math.min(start+size,ls.length)} of ${ls.length})</span></span>
+    <button class="btn ghost sm" data-action="pagenext" ${page>=totalPages?'style="opacity:.4;pointer-events:none"':''}>Next ›</button></div>`:'';
   return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
-    ${filterBar(showOwner)}${tools}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>`;
+    ${filterBar(showOwner)}${tools}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>${pageBar}`;
 }
 
 /* ---------------- FOLLOW-UPS ---------------- */
@@ -966,6 +995,19 @@ function transferUserModal(uid){
       <div class="field"><label>Transfer to</label><select id="tr_to">${opt}</select></div>
       <button class="btn block" data-action="dotransfer" data-uid="${uid}">Transfer ${u.leads||0} leads</button></div></div>`);
 }
+function bulkOwnerModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
+  const opt=assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>🔁 Change owner — ${ids.length} leads</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Transfer the ${ids.length} selected leads to an agent.</div>
+      <div class="field"><label>Transfer to</label><select id="bo_to">${opt}</select></div>
+      <button class="btn block" data-action="dobulkassign">Transfer ${ids.length} leads</button></div></div>`); }
+function bulkStageModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
+  const list=STATUS_LIST.filter(s=>!(state.user.role==='sales'&&s==='Fresh'));
+  const opt=list.map(s=>`<option>${s}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>🏷️ Change stage — ${ids.length} leads</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Set a new status for the ${ids.length} selected leads.</div>
+      <div class="field"><label>New status</label><select id="bs_st">${opt}</select></div>
+      <button class="btn block" data-action="dobulkstatus">Update ${ids.length} leads</button></div></div>`); }
 function callLogModal(id){
   const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,'');
   openModal(`<div class="modal"><div class="modal-h"><h3>📞 Call ${esc(l?l.name:'')}</h3><span class="x" data-action="closemodal">×</span></div>
@@ -1026,7 +1068,16 @@ document.addEventListener('click',async function(e){
     if(a==='dlx'){ return doExport(act.dataset.kind, act.dataset.fmt); }
     if(a==='dl-leads'){ return exportLeads(act.dataset.fmt); }
     if(a==='dl-leads-agent'){ return exportLeadsByAgent(); }
+    if(a==='dl-agents'){ return exportAgentsReport(act.dataset.fmt); }
+    if(a==='dl-calling'){ return exportCallingReport(act.dataset.fmt); }
+    if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
     if(a==='pick'){ return; }
+    if(a==='pageprev'){ state.leadPage=Math.max(1,(state.leadPage||1)-1); return render(); }
+    if(a==='pagenext'){ state.leadPage=(state.leadPage||1)+1; return render(); }
+    if(a==='changeowner'){ return bulkOwnerModal(); }
+    if(a==='changestage'){ return bulkStageModal(); }
+    if(a==='dobulkassign'){ const ids=Object.keys(selLeads); const to=document.getElementById('bo_to').value; const r=await api('/api/leads/bulk-assign','POST',{ids,to}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.moved||0)+' leads → '+r.to; return refresh(); }
+    if(a==='dobulkstatus'){ const ids=Object.keys(selLeads); const status=document.getElementById('bs_st').value; const r=await api('/api/leads/bulk-status','POST',{ids,status}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.changed||0)+' leads → '+status; return refresh(); }
     if(a==='bulkdelete'){ const ids=Object.keys(selLeads); if(!ids.length){ alert('Select some leads first'); return; }
       if(confirm('Delete '+ids.length+' selected lead(s)? They will be recorded in the delete report.')){
         const r=await api('/api/leads/bulk-delete','POST',{ids}); selLeads={};
@@ -1095,13 +1146,15 @@ document.addEventListener('click',async function(e){
 
 function updateSelUI(){ const n=Object.keys(selLeads).length;
   const cnt=document.getElementById('selCount'); if(cnt) cnt.textContent=n?n+' selected':'';
-  const btn=document.getElementById('bulkDelBtn'); if(btn) btn.style.display=n?'':'none';
+  const ba=document.getElementById('bulkActions'); if(ba) ba.style.display=n?'inline-flex':'none';
   document.querySelectorAll('.lead-check').forEach(c=>{ c.checked=!!selLeads[c.dataset.lead]; });
   const all=document.getElementById('selAll'); if(all){ const ids=[...new Set([...document.querySelectorAll('.lead-check')].map(c=>c.dataset.lead))]; all.checked=ids.length>0&&ids.every(id=>selLeads[id]); }
 }
 document.addEventListener('change',async function(e){
   const el=e.target;
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
+  if(el.id==='pageSize'){ state.leadPageSize=+el.value||25; state.leadPage=1; return render(); }
+  if(el.classList&&el.classList.contains('rowown')){ await api('/api/leads/'+el.dataset.lead,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
   if(el.classList&&el.classList.contains('lead-check')){ const id=el.dataset.lead; if(el.checked) selLeads[id]=1; else delete selLeads[id]; return updateSelUI(); }
   if(el.id==='selAll'){ const ids=[...new Set([...document.querySelectorAll('.lead-check')].map(c=>c.dataset.lead))]; ids.forEach(id=>{ if(el.checked) selLeads[id]=1; else delete selLeads[id]; }); return updateSelUI(); }
   const a=el.dataset&&el.dataset.action; const id=el.dataset&&el.dataset.lead;
@@ -1129,15 +1182,16 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Enter' && (e.target.id==='globalSearch'||e.target.id==='searchBox')){ state.searchQ=e.target.value.trim(); go('search'); }
 });
 
-/* real-time auto-refresh — re-fetch current page every 20s, but never interrupt typing or open modals */
+/* real-time auto-refresh — keep the dashboard & follow-ups live every 15s,
+   but never interrupt typing, an open modal, or bulk-selection on the leads page */
 setInterval(function(){
   if(!state.user) return;
   if(document.getElementById('modalBg')) return;                 // a modal is open
   const ae=document.activeElement;
   if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return; // user is entering data
-  if(['lead','settings','connectors'].includes(state.route)) return; // edit-heavy pages
+  if(!['dashboard','followups'].includes(state.route)) return;   // only auto-refresh live views
   refresh();
-}, 20000);
+}, 15000);
 
 /* boot */
 render();
