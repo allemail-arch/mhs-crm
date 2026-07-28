@@ -253,11 +253,12 @@ function reportActivity(user, f) {
   return sales.map(u => {
     const junk = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND status='Junk' AND deleted=0").get(u.id).n;
     const c = cMap[u.id] || { c: 0, t: 0 };
-    // avg first-response minutes (lead created → first CONNECTED call)
+    // avg first-response minutes for TODAY's leads (lead created today → first CONNECTED call).
+    // Restricted to today so old bulk-imported leads don't inflate the number.
     const resp = db.prepare(`SELECT AVG(mins) m FROM (
         SELECT (julianday(MIN(ca.created_at)) - julianday(l.created_at))*24*60 mins
         FROM leads l JOIN calls ca ON ca.lead_id=l.id
-        WHERE l.owner_id=? AND l.deleted=0 AND ca.connected=1 GROUP BY l.id)`).get(u.id).m;
+        WHERE l.owner_id=? AND l.deleted=0 AND ca.connected=1 AND date(l.created_at)=date('now') GROUP BY l.id)`).get(u.id).m;
     return { id: u.id, name: u.name, team: u.team, callsToday: c.c, talktime: c.t || 0,
       avgRespMin: resp ? Math.max(0, Math.round(resp)) : null, junk, working: c.c > 0 };
   });
@@ -526,6 +527,29 @@ const server = http.createServer(async (req, res) => {
           deleted++;
         }
         return send(res, 200, { ok: true, deleted });
+      }
+      // bulk change owner (transfer selected leads to an agent)
+      if (p === '/api/leads/bulk-assign' && m === 'POST') {
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+        const to = b.to; const toUser = to ? userById(to) : null;
+        if (!ids.length) return err(res, 400, 'no leads selected');
+        if (!toUser) return err(res, 400, 'choose an agent');
+        let moved = 0; const upd = db.prepare("UPDATE leads SET owner_id=? WHERE id=? AND deleted=0");
+        for (const id of ids) { const lead = leadRow(id); if (!lead || lead.deleted) continue; upd.run(to, id); logAct(id, '🔁 Reassigned to ' + toUser.name, '', user.name); moved++; }
+        return send(res, 200, { ok: true, moved, to: toUser.name });
+      }
+      // bulk change stage/status for selected leads
+      if (p === '/api/leads/bulk-status' && m === 'POST') {
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+        const status = b.status;
+        if (!ids.length) return err(res, 400, 'no leads selected');
+        if (!cfg.STATUS[status]) return err(res, 400, 'invalid status');
+        if (status === 'Fresh' && user.role === 'sales') return err(res, 403, 'Sales agents cannot set status to Fresh');
+        let changed = 0;
+        for (const id of ids) { const lead = leadRow(id); if (!lead || lead.deleted || lead.status === status) continue; await applyStatusChange(lead, status, user.name); changed++; }
+        return send(res, 200, { ok: true, changed });
       }
 
       // leads
