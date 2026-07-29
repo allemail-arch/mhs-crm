@@ -219,7 +219,10 @@ function reportSummary(user, f) {
   const won = rows.filter(r => cfg.STATUS[r.status]?.won).length;
   const open = rows.filter(r => cfg.STATUS[r.status]?.open).length;
   const interested = rows.filter(r => r.status === 'Interested').length;
-  const bySource = cfg.SOURCES.map(src => ({ src, n: rows.filter(r => r.source === src).length }));
+  // count ALL sources actually present (so imported leads with custom sources like "New Lead" are included)
+  const srcMap = {};
+  rows.forEach(r => { const s = (r.source && String(r.source).trim()) || 'Others'; srcMap[s] = (srcMap[s] || 0) + 1; });
+  const bySource = Object.keys(srcMap).map(src => ({ src, n: srcMap[src] })).sort((a, b) => b.n - a.n);
   // Sales funnel = 5 core pipeline stages (RNR/Junk/Lost are side-states, tracked elsewhere)
   const CORE_STAGES = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   const funnel = CORE_STAGES.map(st => ({ st, n: rows.filter(r => r.status === st).length }));
@@ -538,6 +541,16 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, unassigned: openLeads });
       }
 
+      // clear seeded sample/demo data (leads L1000..L1099 + their calls/activities) — admin only
+      if (p === '/api/admin/clear-sample' && m === 'POST') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const ids = db.prepare("SELECT id FROM leads WHERE id GLOB 'L10[0-9][0-9]'").all().map(r => r.id);
+        const delLead = db.prepare('DELETE FROM leads WHERE id=?');
+        const delAct = db.prepare('DELETE FROM activities WHERE lead_id=?');
+        const delCall = db.prepare('DELETE FROM calls WHERE lead_id=?');
+        let n = 0; for (const id of ids) { delAct.run(id); delCall.run(id); delLead.run(id); n++; }
+        return send(res, 200, { ok: true, removed: n });
+      }
       // bulk soft-delete leads (mark-all → delete)
       if (p === '/api/leads/bulk-delete' && m === 'POST') {
         const b = await readBody(req);
