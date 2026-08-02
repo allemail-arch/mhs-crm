@@ -202,7 +202,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
-  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
+  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -314,12 +314,13 @@ function exportAgentsReport(fmt){ const ags=(state.reports.agents||[]).slice().s
   else downloadXLSX(name+'.xlsx',[{name:'Opportunity Stage',rows:[head,...body]}]); }
 function exportDaily(fmt){ const dr=state.reports.daily; if(!dr||!dr.rows.length){ state.toastMsg='No data to download'; return render(); }
   const rows=dr.rows.slice().sort(byTeamThenName); const durS=s=>s?fmtDur(s):'0s';
-  const head=['Owner name','Email','Team','# Calls','# Connected','Total Call Duration','Avg Call Duration','Total Opp','Fresh Leads','Follow Up','Interested','Not Interested','Won','Overdue Tasks'];
-  const body=rows.map(r=>[r.name,r.email||'',teamCode(r.team),r.calls,r.connected,durS(r.duration),durS(r.avg),r.totalOpp,r.fresh,r.followup,r.interested,r.notInterested,r.won,r.overdue]);
-  const T=rows.reduce((a,r)=>{['calls','connected','duration','totalOpp','fresh','followup','interested','notInterested','won','overdue'].forEach(k=>a[k]=(a[k]||0)+(r[k]||0));return a;},{});
-  body.push(['TOTAL','','',T.calls||0,T.connected||0,durS(T.duration||0),'',T.totalOpp||0,T.fresh||0,T.followup||0,T.interested||0,T.notInterested||0,T.won||0,T.overdue||0]);
-  const name='daily-report-'+dr.date;
-  if(fmt==='pdf') downloadPDF(name+'.pdf','Daily Report — '+dr.date,[{head,body}],[{name:'Daily Report',rows:[head,...body]}]);
+  const head=['Owner name','Email','Team','# Calls','# Connected','Total Call Duration','Avg Call Duration','Total Opp','Fresh Leads','RNR','Follow Up','Interested','Not Interested','Won','Overdue Tasks'];
+  const body=rows.map(r=>[r.name,r.email||'',teamCode(r.team),r.calls,r.connected,durS(r.duration),durS(r.avg),r.totalOpp,r.fresh,r.rnr||0,r.followup,r.interested,r.notInterested,r.won,r.overdue]);
+  const T=rows.reduce((a,r)=>{['calls','connected','duration','totalOpp','fresh','rnr','followup','interested','notInterested','won','overdue'].forEach(k=>a[k]=(a[k]||0)+(r[k]||0));return a;},{});
+  body.push(['TOTAL','','',T.calls||0,T.connected||0,durS(T.duration||0),'',T.totalOpp||0,T.fresh||0,T.rnr||0,T.followup||0,T.interested||0,T.notInterested||0,T.won||0,T.overdue||0]);
+  const dLabel=(dr.from&&dr.to&&dr.from!==dr.to)?(dr.from+'_to_'+dr.to):(dr.date||dr.from);
+  const name='daily-report-'+dLabel;
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Daily Report — '+dLabel,[{head,body}],[{name:'Daily Report',rows:[head,...body]}]);
   else downloadXLSX(name+'.xlsx',[{name:'Daily Report',rows:[head,...body]}]); }
 function exportCallingReport(fmt){ const act=state.reports.activity||[]; if(!act.length){ state.toastMsg='No data to download'; return render(); }
   const head=['Agent','Team','Status','Calls Today','Talk Time','Avg Response (min)','Junk'];
@@ -357,12 +358,16 @@ async function loadRouteData(){
   } else if(r==='settings'){
     state.settings=(await api('/api/settings')).settings;
   } else if(r==='reports'){
-    state.reports.daily=await api('/api/reports/daily'+(state.dailyDate?('?date='+state.dailyDate):''));
+    const dq=new URLSearchParams(); if(state.dailyFrom)dq.set('from',state.dailyFrom); if(state.dailyTo)dq.set('to',state.dailyTo); if(state.dailyOwner)dq.set('owner',state.dailyOwner);
+    state.reports.daily=await api('/api/reports/daily'+(dq.toString()?'?'+dq.toString():''));
+    state.reports.recordings=(await api('/api/calls')).calls||[];
     state.reports.attendance=await api('/api/reports/attendance');
     state.reports.leadsDist=await api('/api/reports/leads-distribution'+(state.reportDate?('?from='+state.reportDate+'&to='+state.reportDate):''));
     state.reports.followups=await api('/api/reports/followups');
     state.reports.deletions=await api('/api/reports/deletions');
     state.reports.usersList=await api('/api/reports/users');
+  } else if(r==='calls'){
+    state.calls=(await api('/api/calls')).calls||[];
   } else if(r==='search'){
     state.searchResults=state.searchQ?((await api('/api/leads/search?q='+encodeURIComponent(state.searchQ))).leads||[]):[];
   } else if(r==='users'){
@@ -416,8 +421,8 @@ function renderLogin(){
 function navItems(){
   const r=state.user.role;
   if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['settings','Settings','⚙️'],['reports','Reports','📄']];
-  if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰']];
-  return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰']];
+  if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
+  return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
 }
 function renderShell(inner){
   const u=state.user;
@@ -450,6 +455,7 @@ function pageContent(){
     case 'settings': return renderSettings();
     case 'reports': return renderReports();
     case 'search': return renderSearch();
+    case 'calls': return renderCalls();
     case 'lead': return renderLeadDetail();
     default: return renderDashboard();
   }
@@ -505,11 +511,14 @@ function renderDashboard(){
     const dueTodayN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isToday(l.next_followup)).length;
     const missedN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isOverdue(l.next_followup)).length;
     const openN=state.leads.filter(l=>STATUS[l.status]?.open).length;
-    const summary=`<div class="kpis" style="margin-bottom:16px">
+    const smS=state.reports.summary||{};
+    const talkStr=smS.myTodayTalk?fmtDur(smS.myTodayTalk):'0s';
+    const summary=`<div class="kpis" style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)">
       <div class="kpi" data-drill data-fstatus="Fresh" style="cursor:pointer;border-left:4px solid #3b5bdb"><div class="lbl">🆕 Fresh Leads (today)</div><div class="val b">${freshN}</div><div class="sub">new leads to work</div></div>
       <div class="kpi" data-drill data-fduetoday="1" style="cursor:pointer;border-left:4px solid #f5a623"><div class="lbl">📅 Today's Follow-ups</div><div class="val o">${dueTodayN}</div><div class="sub">due today — click to open</div></div>
       <div class="kpi" data-drill data-foverdue="1" style="cursor:pointer;border-left:4px solid #e5484d"><div class="lbl">🔴 Missed Follow-ups</div><div class="val" style="color:var(--red)">${missedN}</div><div class="sub">overdue — do these first</div></div>
-      <div class="kpi" data-drill data-fopen="1" style="cursor:pointer;border-left:4px solid #12a150"><div class="lbl">📋 Open Leads</div><div class="val g">${openN}</div><div class="sub">total in your pipeline</div></div></div>`;
+      <div class="kpi" data-drill data-fopen="1" style="cursor:pointer;border-left:4px solid #12a150"><div class="lbl">📋 Open Leads</div><div class="val g">${openN}</div><div class="sub">total in your pipeline</div></div>
+      <div class="kpi" data-nav="calls" style="cursor:pointer;border-left:4px solid #7c5cff"><div class="lbl">📞 Today's Talk Time</div><div class="val" style="color:#7c5cff">${talkStr}</div><div class="sub">${smS.myTodayCalls||0} calls today • call history →</div></div></div>`;
     const list=todayLs.length?`<div class="cards" style="display:flex">${todayLs.map(todayCallCard).join('')}</div>`
       :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 All calls done for today!</div></div>`;
     return `<div class="page-h"><h2>Hello, ${first} 👋</h2></div>
@@ -526,10 +535,11 @@ function renderDashboard(){
   const activity=state.reports.activity||[];
   const offenders=activity.filter(a=>a.junk>=3).sort((a,b)=>b.junk-a.junk);
   let junkAlert='';
-  if(offenders.length) junkAlert=`<div class="panel" style="border:2px solid #ffd0cf;background:#fff7f7;margin-bottom:16px">
+  if(offenders.length && !state.junkDismissed) junkAlert=`<div class="panel" style="border:2px solid #ffd0cf;background:#fff7f7;margin-bottom:16px">
     <div class="panel-b" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="font-size:22px">⚠️</span>
     <div style="flex:1"><b style="color:var(--red)">Junk alert:</b> ${offenders.map(x=>`<span data-drill data-fowner="${x.id}" data-fstatus="Junk" style="cursor:pointer;text-decoration:underline">${esc(x.name)}</span> marked <b>${x.junk}</b> leads as Junk`).join(' • ')}.
-    <span class="lead-sub">Please review these leads.</span></div></div></div>`;
+    <span class="lead-sub">Please review these leads.</span></div>
+    <span class="x" data-action="dismissjunk" title="Dismiss" style="font-size:22px;color:var(--muted);cursor:pointer;padding:0 4px">×</span></div></div>`;
 
   const agents=state.reports.agents||[];
   const teamAgg={}; agents.forEach(a=>{const t=teamAgg[a.team]=teamAgg[a.team]||{leads:0,interested:0,closed:0};
@@ -881,24 +891,44 @@ function renderReports(){
   const dr=state.reports.daily||{date:todayStr(),rows:[]};
   const drRows=dr.rows.slice().sort(byTeamThenName);
   const durS=s=>s?fmtDur(s):'0s';
-  const T={calls:0,connected:0,duration:0,totalOpp:0,fresh:0,followup:0,interested:0,notInterested:0,won:0,overdue:0};
+  const T={calls:0,connected:0,duration:0,totalOpp:0,fresh:0,rnr:0,followup:0,interested:0,notInterested:0,won:0,overdue:0};
   let dBody='',dLastTeam='';
   drRows.forEach(r=>{ Object.keys(T).forEach(k=>T[k]+=(r[k]||0));
-    const teamHdr=r.team!==dLastTeam?`<tr style="background:#fafbff"><td colspan="12" class="grp-td" style="padding:8px 14px">${teamName(r.team)}</td></tr>`:''; dLastTeam=r.team;
+    const teamHdr=r.team!==dLastTeam?`<tr style="background:#fafbff"><td colspan="13" class="grp-td" style="padding:8px 14px">${teamName(r.team)}</td></tr>`:''; dLastTeam=r.team;
     dBody+=teamHdr+`<tr><td><div class="lead-nm">${esc(r.name)}</div><div class="lead-sub">${esc(r.email||'')}</div></td>
       <td class="num">${r.calls}</td><td class="num">${r.connected}</td><td class="num">${durS(r.duration)}</td><td class="num">${durS(r.avg)}</td>
-      <td class="num" style="font-weight:700">${r.totalOpp}</td><td class="num">${r.fresh}</td><td class="num">${r.followup}</td><td class="num">${r.interested}</td>
+      <td class="num" style="font-weight:700">${r.totalOpp}</td><td class="num">${r.fresh}</td><td class="num">${r.rnr||0}</td><td class="num">${r.followup}</td><td class="num">${r.interested}</td>
       <td class="num">${r.notInterested}</td><td class="num">${r.won}</td><td class="num ${r.overdue>0?'overdue':''}">${r.overdue}</td></tr>`;});
-  const totalRow=`<tr style="background:#fff3e0;font-weight:800"><td>TOTAL</td><td class="num">${T.calls}</td><td class="num">${T.connected}</td><td class="num">${durS(T.duration)}</td><td class="num">—</td><td class="num">${T.totalOpp}</td><td class="num">${T.fresh}</td><td class="num">${T.followup}</td><td class="num">${T.interested}</td><td class="num">${T.notInterested}</td><td class="num">${T.won}</td><td class="num">${T.overdue}</td></tr>`;
-  const dailyPanel=`<div class="panel"><div class="panel-h"><div>📅 Daily Report — <b>${esc(dr.date)}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue)</span></div>
-    <span><input type="date" id="dailyDate" value="${esc(state.dailyDate||dr.date||todayStr())}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px"> <button class="btn sm" data-action="dailydate">Apply</button> ${dl2('dl-daily')}</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Owner name</th><th style="text-align:right"># Calls</th><th style="text-align:right"># Connected</th><th style="text-align:right">Total Duration</th><th style="text-align:right">Avg Duration</th><th style="text-align:right">Total Opp</th><th style="text-align:right">Fresh</th><th style="text-align:right">Follow Up</th><th style="text-align:right">Interested</th><th style="text-align:right">Not Interested</th><th style="text-align:right">Won</th><th style="text-align:right">Overdue Tasks</th></tr></thead>
-    <tbody>${dBody||'<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:20px">No agents</td></tr>'}${drRows.length?totalRow:''}</tbody></table></div></div>`;
+  const totalRow=`<tr style="background:#fff3e0;font-weight:800"><td>TOTAL</td><td class="num">${T.calls}</td><td class="num">${T.connected}</td><td class="num">${durS(T.duration)}</td><td class="num">—</td><td class="num">${T.totalOpp}</td><td class="num">${T.fresh}</td><td class="num">${T.rnr}</td><td class="num">${T.followup}</td><td class="num">${T.interested}</td><td class="num">${T.notInterested}</td><td class="num">${T.won}</td><td class="num">${T.overdue}</td></tr>`;
+  const dFrom=state.dailyFrom||dr.from||todayStr(), dTo=state.dailyTo||dr.to||todayStr();
+  const agentOpts='<option value="">All agents</option>'+salesUsers().map(u=>`<option value="${u.id}" ${state.dailyOwner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
+  const dRangeLbl=dFrom===dTo?esc(dFrom):esc(dFrom)+' → '+esc(dTo);
+  const dailyPanel=`<div class="panel"><div class="panel-h" style="flex-wrap:wrap;gap:8px"><div>📅 Daily Report — <b>${dRangeLbl}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue)</span></div>
+    <span style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      <label class="lead-sub">From</label><input type="date" id="dailyFrom" value="${esc(dFrom)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
+      <label class="lead-sub">To</label><input type="date" id="dailyTo" value="${esc(dTo)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
+      <select id="dailyOwner" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${agentOpts}</select>
+      <button class="btn sm" data-action="dailyrange">Apply</button> ${dl2('dl-daily')}</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Owner name</th><th style="text-align:right"># Calls</th><th style="text-align:right"># Connected</th><th style="text-align:right">Total Duration</th><th style="text-align:right">Avg Duration</th><th style="text-align:right">Total Opp</th><th style="text-align:right">Fresh</th><th style="text-align:right">RNR</th><th style="text-align:right">Follow Up</th><th style="text-align:right">Interested</th><th style="text-align:right">Not Interested</th><th style="text-align:right">Won</th><th style="text-align:right">Overdue Tasks</th></tr></thead>
+    <tbody>${dBody||'<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:20px">No agents</td></tr>'}${drRows.length?totalRow:''}</tbody></table></div></div>`;
+
+  // Recordings — call log with recording links (real recordings need Exotel telephony)
+  const rec=state.reports.recordings||[];
+  const recRows=rec.map(c=>`<tr data-lead="${c.lead_id}" style="cursor:pointer"><td class="lead-sub">${loginTime(c.created_at)}</td>
+    <td><div class="lead-nm">${esc(c.lead_name||'')}</div><div class="lead-sub">${esc(c.phone||'')}</div></td>
+    <td>${esc(c.agent||'')}</td>
+    <td>${c.connected?'<span class="badge b-interested">Connected</span>':'<span class="badge b-lost">No answer</span>'}</td>
+    <td class="num">${c.talktime?fmtDur(c.talktime):'0s'}</td>
+    <td class="lead-sub">${c.recording?`<a href="${esc(c.recording)}" target="_blank">▶ Play</a>`:'—'}</td></tr>`).join('');
+  const recPanel=`<div class="panel"><div class="panel-h">🎙️ Call Recordings <span class="lead-sub">recording playback needs Exotel telephony</span></div>
+    <div class="panel-b"><div class="note" style="background:#fff3e0;border:1px solid #ffd9a8;border-radius:8px;padding:10px 12px;margin-bottom:12px;color:#8a5a00">🎙️ Automatic call recordings will appear here once Exotel telephony is connected (SID, Token, Subdomain, Caller ID). Until then this shows the call log; the Recording column stays empty.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Lead</th><th>Agent</th><th>Result</th><th style="text-align:right">Talk time</th><th>Recording</th></tr></thead>
+    <tbody>${recRows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No calls logged yet</td></tr>'}</tbody></table></div></div></div>`;
 
   const tab=state.reportTab||'daily';
-  const tabs=[['daily','📅 Daily Report'],['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
+  const tabs=[['daily','📅 Daily Report'],['recordings','🎙️ Recordings'],['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
   const tabBar=`<div class="filters" style="gap:6px;margin-bottom:16px">${tabs.map(t=>`<button class="btn ${tab===t[0]?'':'ghost'} sm" data-action="rtab" data-tab="${t[0]}">${t[1]}</button>`).join('')}</div>`;
-  const panels={daily:dailyPanel,attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
+  const panels={daily:dailyPanel,recordings:recPanel,attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
   return `<div class="page-h"><h2>Reports</h2><span class="cnt">click a tab • download as Excel or PDF</span></div>${tabBar}${panels[tab]||attPanel}`;
 }
 
@@ -917,14 +947,35 @@ function renderSearch(){
     ${table}<div class="cards">${cards}</div>`;
 }
 
+/* ---------------- CALL HISTORY ---------------- */
+function renderCalls(){
+  const calls=state.calls||[];
+  const showAgent=state.user.role!=='sales';
+  const rows=calls.map(c=>`<tr data-lead="${c.lead_id}"><td class="lead-sub">${loginTime(c.created_at)}</td>
+    <td><div class="lead-nm">${esc(c.lead_name)}</div><div class="lead-sub">${esc(c.phone||'')}</div></td>
+    ${showAgent?`<td>${esc(c.agent)}</td>`:''}
+    <td>${c.connected?'<span class="badge b-interested">Connected</span>':'<span class="badge b-lost">No answer</span>'}</td>
+    <td class="num">${c.talktime?fmtDur(c.talktime):'0s'}</td>
+    <td class="lead-sub">${c.recording?`<a href="${esc(c.recording)}" target="_blank">▶ Play</a>`:'— (needs Exotel)'}</td></tr>`).join('');
+  const table=`<div class="table-wrap"><table><thead><tr><th>When</th><th>Lead</th>${showAgent?'<th>Agent</th>':''}<th>Result</th><th style="text-align:right">Talk time</th><th>Recording</th></tr></thead>
+    <tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px">No calls logged yet</td></tr>`}</tbody></table></div>`;
+  return `<div class="page-h"><h2>📞 Call History</h2><span class="cnt">${calls.length} calls</span></div>
+    <div class="lead-sub" style="margin-bottom:12px">Every call you log (via 📞 Call now → talk time) appears here. Automatic call duration + recordings will appear once Exotel telephony is connected.</div>${table}`;
+}
+
 /* ---------------- LEAD DETAIL ---------------- */
 function renderLeadDetail(){
   const l=state.currentLead; if(!l) return renderLeads(false);
   const tier=scoreTier(l.score);
   const isSales=state.user.role==='sales';
-  // sales cannot set Fresh (keep it only if it's the current status, for correct display)
-  const stList=STATUS_LIST.filter(s=>!(isSales && s==='Fresh' && l.status!=='Fresh'));
-  const stOpt=stList.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
+  // sales agents can NEVER pick Fresh; if a lead is still Fresh, show it as a locked (disabled) current value only
+  let stOpt;
+  if(isSales){
+    const opts=STATUS_LIST.filter(s=>s!=='Fresh').map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
+    stOpt=(l.status==='Fresh'?'<option value="Fresh" selected disabled>Fresh (current — pick a status)</option>':'')+opts;
+  } else {
+    stOpt=STATUS_LIST.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
+  }
   const ownOpt=assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${u.name}</option>`).join('');
   const fuVal=l.next_followup||'';
   const showReminder=STATUS[l.status]?.open;  // hide reminder date for closed statuses (Not Interested, Junk, Closed)
@@ -1103,8 +1154,9 @@ document.addEventListener('click',async function(e){
     if(a==='dl-agents'){ return exportAgentsReport(act.dataset.fmt); }
     if(a==='dl-calling'){ return exportCallingReport(act.dataset.fmt); }
     if(a==='dl-daily'){ return exportDaily(act.dataset.fmt); }
-    if(a==='dailydate'){ state.dailyDate=gv('dailyDate'); return refresh(); }
+    if(a==='dailyrange'){ state.dailyFrom=gv('dailyFrom'); state.dailyTo=gv('dailyTo'); state.dailyOwner=(document.getElementById('dailyOwner')||{}).value||''; return refresh(); }
     if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
+    if(a==='dismissjunk'){ state.junkDismissed=true; return render(); }
     if(a==='pick'){ return; }
     if(a==='pageprev'){ state.leadPage=Math.max(1,(state.leadPage||1)-1); return render(); }
     if(a==='pagenext'){ state.leadPage=(state.leadPage||1)+1; return render(); }
