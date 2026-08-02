@@ -226,7 +226,13 @@ function reportSummary(user, f) {
   // Sales funnel = 5 core pipeline stages (RNR/Junk/Lost are side-states, tracked elsewhere)
   const CORE_STAGES = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   const funnel = CORE_STAGES.map(st => ({ st, n: rows.filter(r => r.status === st).length }));
-  return { total, won, open, interested, conv: total ? Math.round(won / total * 100) : 0, bySource, funnel };
+  // for a sales agent: today's own calls + talk time (for the dashboard card)
+  let myTodayCalls = 0, myTodayTalk = 0;
+  if (user.role === 'sales') {
+    const c = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(talktime),0) t FROM calls WHERE owner_id=? AND date(created_at)=date('now')").get(user.id);
+    myTodayCalls = c.n; myTodayTalk = c.t;
+  }
+  return { total, won, open, interested, conv: total ? Math.round(won / total * 100) : 0, bySource, funnel, myTodayCalls, myTodayTalk };
 }
 function reportAgents(user, f) {
   f = f || {};
@@ -269,7 +275,9 @@ function reportActivity(user, f) {
 // LSQ-style daily report: per agent — calls, connected, durations, pipeline counts, overdue tasks (for a date)
 function reportDaily(user, f) {
   f = f || {};
-  const date = f.date || new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const from = f.from || f.date || today;
+  const to = f.to || f.date || today;
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
@@ -278,7 +286,7 @@ function reportDaily(user, f) {
     const call = db.prepare(`SELECT COUNT(*) calls,
         SUM(CASE WHEN connected=1 THEN 1 ELSE 0 END) conn,
         SUM(CASE WHEN connected=1 THEN talktime ELSE 0 END) dur
-        FROM calls WHERE owner_id=? AND date(created_at)=date(?)`).get(u.id, date);
+        FROM calls WHERE owner_id=? AND date(created_at)>=date(?) AND date(created_at)<=date(?)`).get(u.id, from, to);
     const st = {};
     db.prepare("SELECT status, COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 GROUP BY status").all(u.id).forEach(r => st[r.status] = r.n);
     const totalOpp = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0").get(u.id).n;
@@ -287,11 +295,11 @@ function reportDaily(user, f) {
     return {
       id: u.id, name: u.name, email: u.email || '', team: u.team,
       calls: call.calls || 0, connected: conn, duration: dur, avg: conn ? Math.round(dur / conn) : 0,
-      totalOpp, fresh: st['Fresh'] || 0, followup: st['Follow Up'] || 0, interested: st['Interested'] || 0,
+      totalOpp, fresh: st['Fresh'] || 0, rnr: st['RNR'] || 0, followup: st['Follow Up'] || 0, interested: st['Interested'] || 0,
       notInterested: st['Not Interested'] || 0, won: st['Closed Won'] || 0, overdue,
     };
   });
-  return { date, rows };
+  return { from, to, date: from, rows };
 }
 // per-user + per-team missed / today-due follow-ups
 function reportFollowups(user, f) {
@@ -704,6 +712,21 @@ const server = http.createServer(async (req, res) => {
         if (p === '/api/reports/leads-distribution') return send(res, 200, reportLeadsDist(user, f));
         if (p === '/api/reports/deletions') return send(res, 200, reportDeletions(user));
         if (p === '/api/reports/users') return send(res, 200, reportUsersList(user));
+      }
+
+      // call history / recordings — scoped (sales=own, lead=their agents, admin=all)
+      if (p === '/api/calls' && m === 'GET') {
+        const q = url.searchParams;
+        let where = '1=1', args = [];
+        if (user.role === 'sales') { where += ' AND c.owner_id=?'; args.push(user.id); }
+        else if (user.role === 'lead') { const ids = salesForUser(user).map(u => u.id); ids.push('__none__'); where += ` AND c.owner_id IN (${ids.map(() => '?').join(',')})`; args.push(...ids); }
+        if (q.get('owner')) { where += ' AND c.owner_id=?'; args.push(q.get('owner')); }
+        if (q.get('from')) { where += ' AND date(c.created_at)>=date(?)'; args.push(q.get('from')); }
+        if (q.get('to')) { where += ' AND date(c.created_at)<=date(?)'; args.push(q.get('to')); }
+        const rows = db.prepare(`SELECT c.id, c.lead_id, c.owner_id, c.connected, c.talktime, c.created_at, l.name lead_name, l.phone
+          FROM calls c LEFT JOIN leads l ON l.id=c.lead_id WHERE ${where} ORDER BY c.id DESC LIMIT 500`).all(...args);
+        const rich = rows.map(r => { const o = userById(r.owner_id); return { id: r.id, lead_id: r.lead_id, lead_name: r.lead_name || '—', phone: r.phone || '', agent: o ? o.name : '—', connected: !!r.connected, talktime: r.talktime || 0, created_at: r.created_at, recording: null }; });
+        return send(res, 200, { calls: rich });
       }
 
       // connectors
