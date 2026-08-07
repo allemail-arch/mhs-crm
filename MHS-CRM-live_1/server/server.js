@@ -10,6 +10,8 @@ const crypto = require('node:crypto');
 const { db, hashPin, verifyPin, uid } = require('./db');
 const cfg = require('./config');
 const { sendWhatsApp, clickToCall, sendEmail } = require('./integrations');
+let wa = { init() {}, status() { return { available: false, connected: false, qr: null, error: 'module load failed' }; }, async logout() { return false; } };
+try { wa = require('./whatsapp'); } catch (e) { console.warn('whatsapp module not loaded:', e.message); }
 
 const PORT = process.env.PORT || 4000;
 const SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-CHANGE-ME';
@@ -549,6 +551,17 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, unassigned: openLeads });
       }
 
+      // WhatsApp lead capture (Baileys) — admin only
+      if (p === '/api/whatsapp/status' && m === 'GET') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        return send(res, 200, wa.status());
+      }
+      if (p === '/api/whatsapp/logout' && m === 'POST') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        await wa.logout();
+        return send(res, 200, { ok: true });
+      }
+
       // clear seeded sample/demo data (leads L1000..L1099 + their calls/activities) — admin only
       if (p === '/api/admin/clear-sample' && m === 'POST') {
         if (user.role !== 'admin') return err(res, 403, 'admin only');
@@ -796,3 +809,13 @@ server.listen(PORT, () => {
   if (SECRET.includes('CHANGE-ME')) console.warn('⚠️  JWT_SECRET not set — using insecure dev secret. Set it in .env for production.');
   console.log(`MHS CRM server → http://localhost:${PORT}`);
 });
+
+// WhatsApp lead capture: each incoming WhatsApp message → lead (dedupe by phone) + message on timeline
+try {
+  wa.init(({ name, phone, text }) => {
+    try {
+      const { lead } = createLead({ name, phone, source: 'WhatsApp', external_id: 'wa_' + phone }, 'WhatsApp (live)');
+      if (lead && text) logAct(lead.id, '🟢 WhatsApp: "' + String(text).slice(0, 280) + '"', 'Incoming message', name);
+    } catch (e) { console.warn('wa lead create failed:', e.message); }
+  });
+} catch (e) { console.warn('wa.init failed:', e.message); }
