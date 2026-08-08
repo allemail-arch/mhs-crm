@@ -50,10 +50,12 @@
   .topbar .logo{width:34px;height:34px;border-radius:9px;background:var(--navy);color:#fff;
     display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex:0 0 auto}
   .topbar .logo b{color:var(--orange)}
-  .topnav{display:flex;gap:4px;margin-left:8px}
-  .topnav a{padding:8px 14px;border-radius:9px;color:var(--muted);font-weight:600;font-size:13.5px}
+  .topnav{display:flex;gap:2px;margin-left:8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-ms-overflow-style:none;min-width:0;flex:0 1 auto}
+  .topnav::-webkit-scrollbar{display:none}
+  .topnav a{padding:8px 11px;border-radius:9px;color:var(--muted);font-weight:600;font-size:13.5px;white-space:nowrap;flex:0 0 auto}
   .topnav a.active{background:var(--blue-l);color:var(--blue)}
   .topnav a:hover{color:var(--navy)}
+  #globalSearch{flex:0 1 220px;min-width:0}
   .spacer{flex:1}
   .userchip{display:flex;align-items:center;gap:9px;cursor:pointer;padding:5px 8px;border-radius:10px}
   .userchip:hover{background:var(--bg)}
