@@ -202,7 +202,7 @@ const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta 
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
-  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
+  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -368,6 +368,8 @@ async function loadRouteData(){
     state.reports.usersList=await api('/api/reports/users');
   } else if(r==='calls'){
     state.calls=(await api('/api/calls')).calls||[];
+  } else if(r==='whatsapp'){
+    state.wa=await api('/api/whatsapp/status');
   } else if(r==='search'){
     state.searchResults=state.searchQ?((await api('/api/leads/search?q='+encodeURIComponent(state.searchQ))).leads||[]):[];
   } else if(r==='users'){
@@ -396,10 +398,19 @@ function logout(){ state.token=null; state.user=null; state.pin=''; state.route=
 
 /* ============================================================ RENDER ============================================================ */
 const root=()=>document.getElementById('root');
+let waPoll=null;
 function render(){
   if(!state.user){ root().innerHTML=renderLogin(); return; }
   root().innerHTML=renderShell(pageContent());
   if(state.toastMsg){ showToast(state.toastMsg); state.toastMsg=''; }
+  // WhatsApp page: auto-refresh status (QR / connection) until connected
+  if(state.route==='whatsapp' && state.wa && state.wa.available && !state.wa.connected){
+    if(!waPoll) waPoll=setInterval(async()=>{
+      if(state.route!=='whatsapp'){ clearInterval(waPoll); waPoll=null; return; }
+      try{ state.wa=await api('/api/whatsapp/status'); }catch(e){}
+      render();
+    }, 4000);
+  } else if(waPoll){ clearInterval(waPoll); waPoll=null; }
 }
 
 function renderLogin(){
@@ -420,7 +431,7 @@ function renderLogin(){
 
 function navItems(){
   const r=state.user.role;
-  if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['settings','Settings','⚙️'],['reports','Reports','📄']];
+  if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['whatsapp','WhatsApp','🟢'],['settings','Settings','⚙️'],['reports','Reports','📄']];
   if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
   return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
 }
@@ -456,6 +467,7 @@ function pageContent(){
     case 'reports': return renderReports();
     case 'search': return renderSearch();
     case 'calls': return renderCalls();
+    case 'whatsapp': return renderWhatsApp();
     case 'lead': return renderLeadDetail();
     default: return renderDashboard();
   }
@@ -963,6 +975,40 @@ function renderCalls(){
     <div class="lead-sub" style="margin-bottom:12px">Every call you log (via 📞 Call now → talk time) appears here. Automatic call duration + recordings will appear once Exotel telephony is connected.</div>${table}`;
 }
 
+/* ---------------- WHATSAPP (admin) ---------------- */
+function renderWhatsApp(){
+  const w=state.wa||{available:false};
+  let body;
+  if(!w.available){
+    body=`<div style="text-align:center;padding:30px;color:var(--muted)">
+      <div style="font-size:40px">⏳</div>
+      <div style="font-weight:700;margin:8px 0;color:var(--ink)">WhatsApp module abhi ready nahi</div>
+      <div>Server pe dependency install ho rahi hai / restart ho raha hai. 1–2 min baad ye page refresh karein.${w.error?'<br><span class="lead-sub">('+esc(w.error)+')</span>':''}</div></div>`;
+  } else if(w.connected){
+    body=`<div style="text-align:center;padding:24px">
+      <div style="font-size:44px">🟢</div>
+      <div style="font-weight:800;font-size:18px;margin:6px 0">Connected${w.me?' — '+esc(w.me):''}</div>
+      <div class="lead-sub" style="max-width:480px;margin:0 auto 16px">Ab is number pe aane wali har nayi WhatsApp message apne aap ek <b>lead</b> ban jayegi (source: WhatsApp) aur message timeline pe save hogi. Aap normal chat app me bhi reply kar sakte ho.</div>
+      <button class="btn" style="background:var(--red)" data-action="walogout">Disconnect / re-link</button></div>`;
+  } else if(w.qr){
+    body=`<div style="text-align:center;padding:16px">
+      <div style="font-weight:800;font-size:16px;margin-bottom:6px">Phone se ye QR scan karo</div>
+      <div class="lead-sub" style="margin-bottom:14px">WhatsApp → Settings → Linked Devices → <b>Link a Device</b> → neeche wala QR scan karein</div>
+      <img src="${w.qr}" alt="WhatsApp QR" style="width:280px;height:280px;border:1px solid var(--line);border-radius:12px;background:#fff;padding:8px">
+      <div class="lead-sub" style="margin-top:12px">QR apne aap refresh hota rahega… scan hote hi ye page "Connected" dikhayega.</div></div>`;
+  } else {
+    body=`<div style="text-align:center;padding:30px;color:var(--muted)">
+      <div style="font-size:40px">🔄</div>
+      <div style="font-weight:700;margin:8px 0;color:var(--ink)">Connect ho raha hai…</div>
+      <div>Thodi der me QR aayega (kuch second). Ye page khud refresh ho raha hai.${w.error?'<br><span class="lead-sub">('+esc(w.error)+')</span>':''}</div></div>`;
+  }
+  return `<div class="page-h"><h2>🟢 WhatsApp</h2><span class="cnt">incoming messages → auto leads</span></div>
+    <div class="panel"><div class="panel-h">WhatsApp Lead Capture <span class="lead-sub">free • cloud pe 24/7</span></div>
+    <div class="panel-b">${body}
+    <div class="note" style="background:#fff3e0;border:1px solid #ffd9a8;border-radius:8px;padding:10px 12px;margin-top:16px;color:#8a5a00">⚠️ Ye unofficial tareeka hai — WhatsApp kabhi number ban kar sakta hai. Business rules ka dhyan rakhein. Number aapki normal app me chalta rahega.</div>
+    </div></div>`;
+}
+
 /* ---------------- LEAD DETAIL ---------------- */
 function renderLeadDetail(){
   const l=state.currentLead; if(!l) return renderLeads(false);
@@ -1155,6 +1201,7 @@ document.addEventListener('click',async function(e){
     if(a==='dl-calling'){ return exportCallingReport(act.dataset.fmt); }
     if(a==='dl-daily'){ return exportDaily(act.dataset.fmt); }
     if(a==='dailyrange'){ state.dailyFrom=gv('dailyFrom'); state.dailyTo=gv('dailyTo'); state.dailyOwner=(document.getElementById('dailyOwner')||{}).value||''; return refresh(); }
+    if(a==='walogout'){ if(confirm('WhatsApp disconnect karke naya QR laayein?')){ await api('/api/whatsapp/logout','POST'); state.wa={available:true,connected:false,qr:null}; state.toastMsg='WhatsApp disconnected — naya QR aa raha hai'; return refresh(); } return; }
     if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
     if(a==='dismissjunk'){ state.junkDismissed=true; return render(); }
     if(a==='pick'){ return; }
