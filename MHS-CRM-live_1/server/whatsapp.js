@@ -38,6 +38,25 @@ function textOf(message) {
     || '';
 }
 
+// WhatsApp's newer privacy system routes many personal-chat messages through a
+// "@lid" (linked-id) JID instead of the classic "@s.whatsapp.net" phone-number JID.
+// We accept both, but for @lid we try to recover the real phone number from the
+// alternate fields Baileys attaches when it knows the PN<->LID mapping.
+function realDigitsFromKey(key) {
+  const candidates = [key.remoteJidAlt, key.senderPn, key.participantAlt, key.remoteJid, key.participant].filter(Boolean);
+  for (const c of candidates) {
+    if (String(c).endsWith('@s.whatsapp.net')) {
+      const d = String(c).split('@')[0].replace(/\D/g, '');
+      if (d.length >= 8) return d;
+    }
+  }
+  // fallback: no phone-number JID available (pure @lid) — use the lid's numeric part.
+  // This is NOT a real phone number, but keeps the message from being silently dropped.
+  const jid = key.remoteJid || '';
+  const d = jid.split('@')[0].replace(/\D/g, '');
+  return d.length >= 8 ? d : null;
+}
+
 async function start() {
   if (!baileys) { S.available = false; return; }
   if (starting) return;
@@ -87,6 +106,8 @@ async function start() {
           const jid = msg.key?.remoteJid || '';
           pushRecent({
             evType: ev.type, jid, fromMe: !!msg.key?.fromMe, hasMessage: !!msg.message,
+            remoteJidAlt: msg.key?.remoteJidAlt || null, senderPn: msg.key?.senderPn || null,
+            resolvedDigits: msg.message && !msg.key?.fromMe ? realDigitsFromKey(msg.key || {}) : null,
             msgTypes: msg.message ? Object.keys(msg.message) : [], textPreview: textOf(msg.message).slice(0, 60),
           });
         }
@@ -94,8 +115,10 @@ async function start() {
         for (const msg of (ev.messages || [])) {
           if (!msg.message || msg.key.fromMe) continue;
           const jid = msg.key.remoteJid || '';
-          if (!jid.endsWith('@s.whatsapp.net')) continue; // personal chats only (skip groups/status/broadcast)
-          const digits = jid.split('@')[0].replace(/\D/g, '');
+          // personal chats only (skip groups "@g.us", status/broadcast) — accept both
+          // classic phone-number JIDs and the newer "@lid" privacy JIDs.
+          if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@lid')) continue;
+          const digits = realDigitsFromKey(msg.key);
           if (!digits) continue;
           const name = msg.pushName || ('+' + digits);
           const text = textOf(msg.message);
