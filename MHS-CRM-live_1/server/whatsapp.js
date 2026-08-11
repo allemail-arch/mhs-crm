@@ -17,6 +17,8 @@ const S = { available: !!baileys, connected: false, qrDataUrl: null, error: bail
 let sock = null;
 let onLeadCb = null;
 let starting = false;
+const RECENT = []; // last 20 raw incoming-message events, for debugging only
+function pushRecent(entry) { RECENT.unshift({ time: new Date().toISOString(), ...entry }); if (RECENT.length > 20) RECENT.pop(); }
 
 function sessionDir() {
   const base = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : __dirname;
@@ -81,6 +83,13 @@ async function start() {
 
     sock.ev.on('messages.upsert', (ev) => {
       try {
+        for (const msg of (ev.messages || [])) {
+          const jid = msg.key?.remoteJid || '';
+          pushRecent({
+            evType: ev.type, jid, fromMe: !!msg.key?.fromMe, hasMessage: !!msg.message,
+            msgTypes: msg.message ? Object.keys(msg.message) : [], textPreview: textOf(msg.message).slice(0, 60),
+          });
+        }
         if (ev.type !== 'notify') return;
         for (const msg of (ev.messages || [])) {
           if (!msg.message || msg.key.fromMe) continue;
@@ -92,7 +101,7 @@ async function start() {
           const text = textOf(msg.message);
           if (onLeadCb) { try { onLeadCb({ name, phone: '+' + digits, text }); } catch (_) {} }
         }
-      } catch (_) {}
+      } catch (e) { pushRecent({ error: e && e.message ? e.message : String(e) }); }
     });
   } catch (e) {
     S.error = e && e.message ? e.message : String(e);
@@ -103,7 +112,7 @@ async function start() {
 
 module.exports = {
   init(cb) { onLeadCb = cb; if (baileys) start(); },
-  status() { return { available: S.available, connected: S.connected, qr: S.qrDataUrl, error: S.error, me: S.me }; },
+  status() { return { available: S.available, connected: S.connected, qr: S.qrDataUrl, error: S.error, me: S.me, recent: RECENT }; },
   async logout() {
     try { if (sock && S.connected) await sock.logout(); } catch (_) {}
     try { if (sock && sock.end) sock.end(undefined); } catch (_) {}
