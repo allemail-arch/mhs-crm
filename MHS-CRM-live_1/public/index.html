@@ -652,7 +652,7 @@ function renderLeads(mineOnly){
       <td>${showOwner?ownSel(l):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
   const allChecked=pageLs.length&&pageLs.every(l=>selLeads[l.id]);
   const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
-        <th>${showOwner?'Owner (assign)':(state.filters.todayfresh?'':'Follow-up')}</th>${showOwner?`<th>${state.filters.todayfresh?'':'Follow-up'}</th>`:''}</tr></thead>`;
+            <th>${showOwner?'Owner (assign)':(state.filters.todayfresh?'':'Follow-up')}</th>${showOwner?`<th>${state.filters.todayfresh?'':'Follow-up'}</th>`:''}</tr></thead>
     <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
     const cards=pageLs.map(l=>{const fu=state.filters.todayfresh?'':(l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'');
     return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
