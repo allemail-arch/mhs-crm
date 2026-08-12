@@ -17,6 +17,8 @@ const S = { available: !!baileys, connected: false, qrDataUrl: null, error: bail
 let sock = null;
 let onLeadCb = null;
 let starting = false;
+let retryDelay = 3000; // ms — grows on repeated failures so a stuck/expired session can't hammer boot-time health checks
+const RETRY_MAX = 60000;
 const RECENT = []; // last 20 raw incoming-message events, for debugging only
 function pushRecent(entry) { RECENT.unshift({ time: new Date().toISOString(), ...entry }); if (RECENT.length > 20) RECENT.pop(); }
 
@@ -86,16 +88,20 @@ async function start() {
       if (connection === 'open') {
         S.connected = true; S.qrDataUrl = null; S.error = null;
         S.me = (sock.user && sock.user.id) ? String(sock.user.id).split(':')[0].split('@')[0] : null;
+        retryDelay = 3000; // reset backoff after a successful connection
       } else if (connection === 'close') {
         S.connected = false;
         const code = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode;
         const loggedOut = baileys.DisconnectReason && code === baileys.DisconnectReason.loggedOut;
         if (loggedOut) {
           try { fs.rmSync(sessionDir(), { recursive: true, force: true }); } catch (_) {}
-          S.qrDataUrl = null; S.me = null;
+          S.qrDataUrl = null; S.me = null; retryDelay = 3000;
           setTimeout(start, 1500);
         } else {
-          setTimeout(start, 3000); // transient — reconnect
+          // transient (or a stuck/expired session repeatedly timing out) — back off exponentially
+          // so a broken WhatsApp session can never hammer the process during/after boot.
+          setTimeout(start, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
         }
       }
     });
@@ -129,7 +135,8 @@ async function start() {
   } catch (e) {
     S.error = e && e.message ? e.message : String(e);
     starting = false;
-    setTimeout(start, 5000);
+    setTimeout(start, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
   }
 }
 
