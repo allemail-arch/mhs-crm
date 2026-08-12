@@ -626,6 +626,8 @@ const server = http.createServer(async (req, res) => {
         if (q.get('overdue')) { where += " AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
         if (q.get('duetoday')) { where += " AND next_followup = date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
          if (q.get('todayfresh')) { where += " AND status='Fresh' AND date(created_at)=date('now')"; }
+        if (q.get('dateFrom')) { where += " AND date(created_at)>=?"; args.push(q.get('dateFrom')); }
+        if (q.get('dateTo')) { where += " AND date(created_at)<=?"; args.push(q.get('dateTo')); }
         if (q.get('q')) { where += ' AND (name LIKE ? OR phone LIKE ? OR city LIKE ? OR email LIKE ?)'; const t = '%' + q.get('q') + '%'; args.push(t, t, t, t); }
         const rows = db.prepare(`SELECT * FROM leads WHERE ${where} ORDER BY created_at DESC`).all(...args);
         return send(res, 200, { leads: rows.map(r => leadJSON(r)) });
