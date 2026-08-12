@@ -645,16 +645,16 @@ function renderLeads(mineOnly){
   const page=Math.min(Math.max(1,state.leadPage||1), totalPages); state.leadPage=page;
   const start=(page-1)*size; const pageLs=ls.slice(start, start+size);
   const ownSel=l=>`<select class="rowown" data-lead="${l.id}" data-action="pick" style="max-width:150px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:#fff">${assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}${l.owner_id&&!assignableAgents().some(u=>u.id===l.owner_id)?`<option value="${l.owner_id}" selected>${esc(l.owner_name||'—')}</option>`:''}</select>`;
-  const rows=pageLs.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
+    const rows=pageLs.map(l=>{const fu=state.filters.todayfresh?'':(l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—');
     return `<tr data-lead="${l.id}"><td data-action="pick" style="width:34px;text-align:center"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></td>
       <td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
       <td>${srcChip(l.source)}</td><td><span class="pill">${esc(l.product)}</span></td><td>${badge(l.status)}</td>
       <td>${showOwner?ownSel(l):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
   const allChecked=pageLs.length&&pageLs.every(l=>selLeads[l.id]);
   const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
-    <th>${showOwner?'Owner (assign)':'Follow-up'}</th>${showOwner?'<th>Follow-up</th>':''}</tr></thead>
+        <th>${showOwner?'Owner (assign)':(state.filters.todayfresh?'':'Follow-up')}</th>${showOwner?`<th>${state.filters.todayfresh?'':'Follow-up'}</th>`:''}</tr></thead>`;
     <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
-  const cards=pageLs.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
+    const cards=pageLs.map(l=>{const fu=state.filters.todayfresh?'':(l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'');
     return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
       <div class="row">${srcChip(l.source)}<span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
       <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
