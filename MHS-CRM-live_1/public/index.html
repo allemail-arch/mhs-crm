@@ -351,7 +351,7 @@ async function loadRouteData(){
     else { state.reports.agents=(await api('/api/reports/agents'+q)).agents; state.reports.activity=(await api('/api/reports/activity'+q)).activity; }
   } else if(r==='leads'||r==='myleads'){
     const q=new URLSearchParams(); const f=state.filters;
-    if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner);
+    if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner); if(f.todayfresh)q.set('todayfresh','1');
     if(f.product)q.set('product',f.product); if(f.open)q.set('open','1'); if(f.overdue)q.set('overdue','1'); if(f.duetoday)q.set('duetoday','1');
     state.leads=(await api('/api/leads?'+q.toString())).leads;
   } else if(r==='followups'){
@@ -621,7 +621,7 @@ function filterBar(showOwner){
   const srOpt=srcList().map(s=>`<option ${f.source===s?'selected':''}>${s}</option>`).join('');
   const owOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
   const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}" ${f.product===p?'selected':''}>${teamName(p)}</option>`).join('');
-  const any=f.status||f.source||f.owner||f.product||f.open||f.overdue||f.duetoday||f.q;
+    const any=f.status||f.source||f.owner||f.product||f.open||f.overdue||f.duetoday||f.todayfresh||f.q;
   return `<div class="filters">
     <input class="search" id="fq" placeholder="🔍  Search name, phone, city…" value="${esc(f.q)}">
     <select id="fstatus"><option value="">All Status</option>${stOpt}</select>
@@ -631,6 +631,7 @@ function filterBar(showOwner){
     ${f.open?'<span class="pill">Open only</span>':''}
     ${f.overdue?'<span class="pill" style="background:#fdecea;color:#c0392b">⏰ Overdue follow-ups only</span>':''}
     ${f.duetoday?'<span class="pill" style="background:#fff4e5;color:#c77700">📅 Due today only</span>':''}
+    ${f.todayfresh?'<button class="btn sm" data-action="togtodayfresh">🆕 Today\'s Fresh ✓</button>':'<button class="btn ghost sm" data-action="togtodayfresh">🆕 Today\'s Fresh</button>'}
     ${any?'<button class="btn ghost sm" data-action="clearfilters">✕ Clear</button>':''}</div>`;
 }
 function renderLeads(mineOnly){
@@ -1240,7 +1241,8 @@ document.addEventListener('click',async function(e){
       state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer')}; return refresh(); }
     if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:''}; return refresh(); }
     if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Opening email…'; return refresh(); }
-    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:''}; return refresh(); }
+    if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:''}; return refresh(); }
+          if(a==='togtodayfresh'){ state.filters.todayfresh=state.filters.todayfresh?'':'1'; return refresh(); }
     if(a==='closemodal'){ return closeModal(); }
     if(a==='savelead'){
       const name=gv('nl_name'); if(!name){alert('Enter a name');return;}
