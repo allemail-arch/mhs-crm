@@ -675,6 +675,7 @@ function renderLeads(mineOnly){
     <span id="bulkActions" style="display:${selN?'inline-flex':'none'};gap:8px">
       <button class="btn sm" data-action="changeowner">🔁 Change Owner</button>
       <button class="btn sm" data-action="changestage">🏷️ Change Stage</button>
+      <button class="btn sm" data-action="changeproduct">📦 Change Product</button>
       <button class="btn sm" style="background:var(--red)" data-action="bulkdelete">🗑️ Delete</button></span></div>`;
   const pageBar=ls.length>size?`<div class="filters" style="gap:8px;justify-content:flex-end;margin-top:10px">
     <span class="lead-sub">Rows per page:</span>
@@ -794,6 +795,7 @@ function importModal(){
   IMPORT_ROWS=[]; IMPORT_MAP={}; IMPORT_HEADERS=[]; IMPORT_BAD=[]; IMPORT_PRODUCT_MISSES={};
   const teams=CFG().teams||{};
   const prOpt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
+  const agOpt=assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)}${u.team?' ('+esc(u.team)+')':''}</option>`).join('');
   openModal(`<div class="modal" style="max-width:720px"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. <b>Name and Phone are required.</b> Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped (one phone = one lead).</div>
@@ -804,6 +806,13 @@ function importModal(){
           ${prOpt}
         </select>
         <div class="lead-sub" style="margin-top:4px">Pick a product to force <b>every</b> row in this file into it. This overrides the sheet's Product column — use it when the sheet has no Product column or the names don't match.</div>
+      </div>
+      <div class="field"><label>Assign these leads to</label>
+        <select id="importOwner">
+          <option value="">Round-robin across the product's agents (default)</option>
+          ${agOpt}
+        </select>
+        <div class="lead-sub" style="margin-top:4px">Choose one person to hand the <b>whole file</b> to a single POC instead of splitting it round-robin.</div>
       </div>
       <div id="importInfo" class="lead-sub" style="min-height:18px;margin:10px 0"></div>
       <div id="importPreview"></div>
@@ -903,6 +912,8 @@ function renderImportPreview(){
   const info=document.getElementById('importInfo'); const prev=document.getElementById('importPreview');
   const btn=document.getElementById('doImportBtn'); if(!info||!prev||!btn) return;
   const forced=(document.getElementById('importProduct')||{}).value||'';
+  const ownerId=(document.getElementById('importOwner')||{}).value||'';
+  const poc=ownerId?userById(ownerId):null;
   const noProd=IMPORT_ROWS.filter(r=>!r.product).length;
   const willImport=forced?IMPORT_ROWS.length:IMPORT_ROWS.length-noProd;
   const fields=['name','phone','email','city','product','source'];
@@ -925,6 +936,8 @@ function renderImportPreview(){
       <div style="font-weight:600;margin-bottom:6px">Column mapping — check this before importing</div>
       <table style="font-size:12px">${mapRows}</table>
       <div style="margin-top:8px">Products: ${prodChips||'—'}</div>
+      <div style="margin-top:6px">Assigned to: ${poc?'<b>'+esc(poc.name)+'</b>'+(poc.team?' <span class="pill">'+esc(poc.team)+'</span>':''):'round-robin'}</div>
+      ${(poc&&forced&&poc.team&&poc.team!==forced)?`<div style="margin-top:6px;color:var(--amber,#c78a00)">${esc(poc.name)} is on <b>${esc(poc.team)}</b>, not <b>${esc(forced)}</b>. The leads will still go to them — check this is what you want.</div>`:''}
       ${(!forced&&missKeys.length)?`<div style="margin-top:8px;color:var(--red)">
          Product values in the sheet that don't exist in this CRM: ${missKeys.map(k=>'<b>'+esc(k)+'</b> ('+IMPORT_PRODUCT_MISSES[k]+' rows)').join(', ')}.
          Add the product in Sources → Routing, fix the sheet, or pick a product above.</div>`:''}
@@ -933,7 +946,7 @@ function renderImportPreview(){
       <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">product</td><td>source</td></tr>${sample}</table>
       ${IMPORT_BAD.length?`<div style="margin-top:8px;color:var(--muted)">Dropped: ${esc(IMPORT_BAD.slice(0,6).map(b=>'row '+b.row+' — '+b.why).join(' · '))}${IMPORT_BAD.length>6?' …':''}</div>`:''}
     </div>`;
-  btn.textContent=willImport?('Import '+willImport+' leads'+(forced?' into '+forced:'')):'Nothing to import';
+  btn.textContent=willImport?('Import '+willImport+' leads'+(forced?' into '+forced:'')+(poc?' → '+poc.name:'')):'Nothing to import';
   btn.disabled=!willImport; btn.style.opacity=willImport?'1':'.5';
 }
 function importResultModal(r){
@@ -948,6 +961,7 @@ function importResultModal(r){
       ${line('skipped — no product / unknown product',r.badProduct,'var(--red)')}
       ${line('skipped — no name or invalid phone',r.skipped,'var(--red)')}
       <div style="margin:10px 0 4px;font-weight:600">Imported into</div><div>${byProduct}</div>
+      <div style="margin-top:6px">Assigned to: ${r.assignedTo?'<b>'+esc(r.assignedTo)+'</b> (single POC)':'round-robin'}</div>
       ${dups?`<div style="margin:12px 0 4px;font-weight:600">Duplicate phones already in the CRM (showing ${Math.min(25,(r.dupPhones||[]).length)} of ${r.duplicates})</div>
         <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">already in</td><td>owner</td></tr>${dups}</table>`:''}
       ${probs?`<div style="margin:12px 0 4px;font-weight:600">Rejected rows${r.problemsTotal>25?' (showing 25 of '+r.problemsTotal+')':''}</div><div style="color:var(--red)">${probs}</div>`:''}
@@ -1257,6 +1271,15 @@ function bulkOwnerModal(){ const ids=Object.keys(selLeads); if(!ids.length){aler
     <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Transfer the ${ids.length} selected leads to an agent.</div>
       <div class="field"><label>Transfer to</label><select id="bo_to">${opt}</select></div>
       <button class="btn block" data-action="dobulkassign">Transfer ${ids.length} leads</button></div></div>`); }
+function bulkProductModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
+  const teams=CFG().teams||{};
+  const opt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>\u{1F4E6} Change product — ${ids.length} leads</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Move the ${ids.length} selected leads into another product/team. Use this to correct leads that were imported under the wrong product.</div>
+      <div class="field"><label>Move to product</label><select id="bp_to">${opt}</select></div>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin:10px 0"><input type="checkbox" id="bp_reassign" checked style="margin-top:3px">
+        <span class="lead-sub">Also re-assign owners via round-robin to that product's agents (recommended — otherwise the leads stay with agents from the old team)</span></label>
+      <button class="btn block" data-action="dobulkproduct">Move ${ids.length} leads</button></div></div>`); }
 function bulkStageModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
   const list=STATUS_LIST.filter(s=>!(state.user.role==='sales'&&s==='Fresh'));
   const opt=list.map(s=>`<option>${s}</option>`).join('');
@@ -1338,6 +1361,12 @@ document.addEventListener('click',async function(e){
     if(a==='changeowner'){ return bulkOwnerModal(); }
     if(a==='changestage'){ return bulkStageModal(); }
     if(a==='dobulkassign'){ const ids=Object.keys(selLeads); const to=document.getElementById('bo_to').value; const r=await api('/api/leads/bulk-assign','POST',{ids,to}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.moved||0)+' leads → '+r.to; return refresh(); }
+    if(a==='changeproduct'){ return bulkProductModal(); }
+    if(a==='dobulkproduct'){ const ids=Object.keys(selLeads); const product=document.getElementById('bp_to').value;
+      const reassign=document.getElementById('bp_reassign').checked;
+      const r=await api('/api/leads/bulk-product','POST',{ids,product,reassign}); if(r.error){alert(r.error);return;}
+      selLeads={}; closeModal();
+      state.toastMsg='✅ '+(r.moved||0)+' leads → '+r.product+(r.reassigned?' ('+r.reassigned+' re-assigned)':''); return refresh(); }
     if(a==='dobulkstatus'){ const ids=Object.keys(selLeads); const status=document.getElementById('bs_st').value; const r=await api('/api/leads/bulk-status','POST',{ids,status}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.changed||0)+' leads → '+status; return refresh(); }
     if(a==='bulkdelete'){ const ids=Object.keys(selLeads); if(!ids.length){ alert('Select some leads first'); return; }
       if(confirm('Delete '+ids.length+' selected lead(s)? They will be recorded in the delete report.')){
@@ -1348,8 +1377,9 @@ document.addEventListener('click',async function(e){
     if(a==='samplecsv'){ return downloadSampleCsv(); }
     if(a==='doimport'){ if(!IMPORT_ROWS.length) return;
       const forced=(document.getElementById('importProduct')||{}).value||'';
+      const owner=(document.getElementById('importOwner')||{}).value||'';
       const btn=document.getElementById('doImportBtn'); if(btn){ btn.disabled=true; btn.textContent='Importing…'; }
-      const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS,product:forced});
+      const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS,product:forced,owner_id:owner});
       if(r.error){ if(btn){ btn.disabled=false; btn.textContent='Import'; } alert(r.error); return; }
       IMPORT_ROWS=[]; closeModal(); importResultModal(r); return refresh(); }
     if(a==='addproduct'){ return addProductModal(); }
@@ -1419,7 +1449,7 @@ function updateSelUI(){ const n=Object.keys(selLeads).length;
 document.addEventListener('change',async function(e){
   const el=e.target;
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
-  if(el.id==='importProduct'){ if(IMPORT_ROWS.length) renderImportPreview(); return; }
+  if(el.id==='importProduct'||el.id==='importOwner'){ if(IMPORT_ROWS.length) renderImportPreview(); return; }
   if(el.id==='pageSize'){ state.leadPageSize=+el.value||25; state.leadPage=1; return render(); }
   if(el.classList&&el.classList.contains('rowown')){ const id=el.dataset.lead; const to=el.value;
     const r=await api('/api/leads/'+id,'PATCH',{owner_id:to}); if(r&&r.error){ alert(r.error); return refresh(); }
