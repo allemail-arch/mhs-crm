@@ -600,6 +600,38 @@ const server = http.createServer(async (req, res) => {
         for (const id of ids) { const lead = leadRow(id); if (!lead || lead.deleted) continue; upd.run(to, id); logAct(id, '🔁 Reassigned to ' + toUser.name, '', user.name); moved++; }
         return send(res, 200, { ok: true, moved, to: toUser.name });
       }
+      // bulk change product/team for selected leads (fixes leads imported into the wrong product)
+      if (p === '/api/leads/bulk-product' && m === 'POST') {
+        if (user.role === 'sales') return err(res, 403, 'admin or team lead only');
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
+        const product = b.product ? String(b.product).trim() : '';
+        if (!ids.length) return err(res, 400, 'no leads selected');
+        const teams = getTeams();
+        if (!teams[product]) return err(res, 400, 'unknown product: ' + product);
+        const reassign = !!b.reassign;
+        let moved = 0, reassigned = 0; const byAgent = {};
+        const upd = db.prepare("UPDATE leads SET product=?, updated_at=datetime('now') WHERE id=? AND deleted=0");
+        const updOwner = db.prepare('UPDATE leads SET owner_id=? WHERE id=?');
+        for (const id of ids) {
+          const lead = leadRow(id);
+          if (!lead || lead.deleted || lead.product === product) continue;
+          const from = lead.product;
+          upd.run(product, id);
+          logAct(id, '📦 Product: ' + (from || '—') + ' → ' + product, '', user.name);
+          moved++;
+          if (reassign) {
+            const a = nextAgent(product);
+            if (a && a.id !== lead.owner_id) {
+              updOwner.run(a.id, id);
+              logAct(id, '🔁 Round-robin → ' + a.name, 'after product change', 'System');
+              reassigned++;
+              byAgent[a.name] = (byAgent[a.name] || 0) + 1;
+            }
+          }
+        }
+        return send(res, 200, { ok: true, moved, reassigned, product, byAgent });
+      }
       // bulk change stage/status for selected leads
       if (p === '/api/leads/bulk-status' && m === 'POST') {
         const b = await readBody(req);
@@ -641,26 +673,56 @@ const server = http.createServer(async (req, res) => {
         if (deduped) { const o = userById(lead.owner_id); return send(res, 200, { duplicate: true, owner_name: o ? o.name : '—', lead: leadJSON(lead, true) }); }
         return send(res, 200, { ok: true, lead: leadJSON(lead, true) });
       }
-      // bulk import (Excel/CSV) → each lead round-robin auto-assigned
+      // bulk import (Excel/CSV) → each lead round-robin auto-assigned.
+      // A lead is NEVER imported into a guessed product: either the row names a
+      // real product or the whole import is forced into one chosen in the UI.
+      // Anything unresolvable is rejected and reported back, not defaulted.
       if (p === '/api/leads/bulk' && m === 'POST') {
         const b = await readBody(req);
         const list = Array.isArray(b.leads) ? b.leads : [];
         if (!list.length) return err(res, 400, 'no leads to import');
         if (list.length > 5000) return err(res, 400, 'max 5000 leads per import');
-        let created = 0, skipped = 0, duplicates = 0; const byAgent = {};
-        for (const row of list) {
-          if (!row || !String(row.name || '').trim()) { skipped++; continue; }
+        const teams = getTeams();
+        const forced = b.product ? String(b.product).trim() : '';
+        if (forced && !teams[forced]) return err(res, 400, 'unknown product: ' + forced);
+        // optional single POC for the whole import — otherwise round-robin as before
+        const pocId = b.owner_id ? String(b.owner_id).trim() : '';
+        let poc = null;
+        if (pocId) {
+          poc = userById(pocId);
+          if (!poc) return err(res, 400, 'unknown agent');
+          if (!poc.active) return err(res, 400, poc.name + ' is not an active user');
+        }
+        let created = 0, skipped = 0, duplicates = 0, badProduct = 0;
+        const byAgent = {}, byProduct = {}, problems = [], dupPhones = [];
+        for (let i = 0; i < list.length; i++) {
+          const row = list[i] || {};
+          const rowNo = row.__row || (i + 2);
+          const nm = String(row.name || '').trim();
+          if (!nm) { skipped++; problems.push({ row: rowNo, why: 'no name' }); continue; }
+          if (normPhone(row.phone).length < 7) { skipped++; problems.push({ row: rowNo, name: nm, why: 'phone missing or invalid' }); continue; }
+          const wanted = forced || String(row.product || '').trim();
+          if (!wanted) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'no product in the row — choose a product for the import' }); continue; }
+          if (!teams[wanted]) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'product "' + wanted + '" does not exist in this CRM' }); continue; }
           const { lead, deduped } = createLead({
-            name: row.name, phone: row.phone, email: row.email, city: row.city,
-            product: row.product, source: row.source || 'Bulk Upload',
-            owner_id: row.owner_id || null,
-          }, user.name + ' (import)', { autoAssign: true });
-          if (deduped) { duplicates++; continue; }
+            name: nm, phone: row.phone, email: row.email, city: row.city,
+            product: wanted, source: row.source || 'Bulk Upload',
+            owner_id: (poc && poc.id) || row.owner_id || null,
+          }, user.name + ' (import)', { autoAssign: !poc });
+          if (deduped) {
+            duplicates++;
+            if (dupPhones.length < 200) dupPhones.push({ row: rowNo, name: nm, phone: String(row.phone || ''),
+              existing_product: lead.product, existing_owner: userById(lead.owner_id)?.name || '—' });
+            continue;
+          }
           created++;
+          byProduct[wanted] = (byProduct[wanted] || 0) + 1;
           const on = userById(lead.owner_id)?.name || '—';
           byAgent[on] = (byAgent[on] || 0) + 1;
         }
-        return send(res, 200, { ok: true, created, skipped, duplicates, byAgent });
+        return send(res, 200, { ok: true, created, skipped, duplicates, badProduct, byAgent, byProduct,
+          assignedTo: poc ? poc.name : null,
+          dupPhones, problems: problems.slice(0, 200), problemsTotal: problems.length });
       }
       // global search — find any lead + who owns it (available to all roles)
       if (p === '/api/leads/search' && m === 'GET') {
@@ -694,6 +756,12 @@ const server = http.createServer(async (req, res) => {
         // apply the follow-up date first so applyStatusChange doesn't overwrite it
         if (b.next_followup !== undefined) { db.prepare('UPDATE leads SET next_followup=? WHERE id=?').run(b.next_followup || null, lead.id); logAct(lead.id, '⏰ Reminder set', b.next_followup || 'cleared', user.name); lead.next_followup = b.next_followup || null; }
         if (b.status && b.status !== lead.status) await applyStatusChange(lead, b.status, user.name);
+        if (b.product !== undefined && b.product !== lead.product) {
+          const teams = getTeams();
+          if (!teams[b.product]) return err(res, 400, 'unknown product: ' + b.product);
+          db.prepare('UPDATE leads SET product=? WHERE id=?').run(b.product, lead.id);
+          logAct(lead.id, '📦 Product: ' + (lead.product || '—') + ' → ' + b.product, '', user.name);
+        }
         if (b.owner_id && b.owner_id !== lead.owner_id) { db.prepare('UPDATE leads SET owner_id=? WHERE id=?').run(b.owner_id, lead.id); logAct(lead.id, '🔁 Reassigned to ' + (userById(b.owner_id)?.name || b.owner_id), '', user.name); }
         return send(res, 200, { ok: true, lead: leadJSON(leadRow(lead.id), true) });
       }

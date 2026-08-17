@@ -675,6 +675,7 @@ function renderLeads(mineOnly){
     <span id="bulkActions" style="display:${selN?'inline-flex':'none'};gap:8px">
       <button class="btn sm" data-action="changeowner">🔁 Change Owner</button>
       <button class="btn sm" data-action="changestage">🏷️ Change Stage</button>
+      <button class="btn sm" data-action="changeproduct">📦 Change Product</button>
       <button class="btn sm" style="background:var(--red)" data-action="bulkdelete">🗑️ Delete</button></span></div>`;
   const pageBar=ls.length>size?`<div class="filters" style="gap:8px;justify-content:flex-end;margin-top:10px">
     <span class="lead-sub">Rows per page:</span>
@@ -789,14 +790,32 @@ function renderSettings(){
       <button class="btn" style="background:var(--red)" data-action="clearsample">🗑️ Remove sample/demo leads</button></div></div>`;
 }
 /* ---------------- BULK IMPORT (Excel/CSV) ---------------- */
-let IMPORT_ROWS=[];
+let IMPORT_ROWS=[], IMPORT_MAP={}, IMPORT_HEADERS=[], IMPORT_BAD=[], IMPORT_PRODUCT_MISSES={};
 function importModal(){
-  IMPORT_ROWS=[];
-  openModal(`<div class="modal"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
+  IMPORT_ROWS=[]; IMPORT_MAP={}; IMPORT_HEADERS=[]; IMPORT_BAD=[]; IMPORT_PRODUCT_MISSES={};
+  const teams=CFG().teams||{};
+  const prOpt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
+  const agOpt=assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)}${u.team?' ('+esc(u.team)+')':''}</option>`).join('');
+  openModal(`<div class="modal" style="max-width:720px"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. <b>Name and Phone are required.</b> Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped (one phone = one lead).</div>
       <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="margin-bottom:12px;width:100%">
-      <div id="importInfo" class="lead-sub" style="min-height:18px;margin-bottom:10px"></div>
+      <div class="field"><label>Product / Team for this import</label>
+        <select id="importProduct">
+          <option value="">— use the Product column from the sheet —</option>
+          ${prOpt}
+        </select>
+        <div class="lead-sub" style="margin-top:4px">Pick a product to force <b>every</b> row in this file into it. This overrides the sheet's Product column — use it when the sheet has no Product column or the names don't match.</div>
+      </div>
+      <div class="field"><label>Assign these leads to</label>
+        <select id="importOwner">
+          <option value="">Round-robin across the product's agents (default)</option>
+          ${agOpt}
+        </select>
+        <div class="lead-sub" style="margin-top:4px">Choose one person to hand the <b>whole file</b> to a single POC instead of splitting it round-robin.</div>
+      </div>
+      <div id="importInfo" class="lead-sub" style="min-height:18px;margin:10px 0"></div>
+      <div id="importPreview"></div>
       <button class="btn block" data-action="doimport" id="doImportBtn" disabled style="opacity:.5">Import</button>
       <div style="margin-top:10px;text-align:center"><button class="btn ghost sm" data-action="samplecsv">↓ Sample CSV download</button></div>
     </div></div>`);
@@ -806,39 +825,156 @@ function splitCsv(line){ const out=[]; let cur='',q=false;
     if(c==='"'){ if(q&&line[i+1]==='"'){cur+='"';i++;} else q=!q; }
     else if(c===','&&!q){ out.push(cur); cur=''; } else cur+=c; }
   out.push(cur); return out.map(s=>s.trim()); }
-function csvToRows(text){ const lines=text.split(/\r?\n/).filter(l=>l.trim()); if(!lines.length)return[];
-  const headers=splitCsv(lines[0]); return lines.slice(1).map(line=>{const cells=splitCsv(line);const o={};headers.forEach((h,i)=>o[h]=cells[i]||'');return o;}); }
-function mapImportRow(r){
-  const keys=Object.keys(r);
-  const g=(cands)=>{ for(const k of keys){ const kl=String(k).toLowerCase().trim(); if(cands.some(n=>kl===n||kl.includes(n))) return String(r[k]==null?'':r[k]).trim(); } return ''; };
-  let product=g(['product','team','category','vertical']);
+function csvToMatrix(text){ const lines=text.split(/\r?\n/).filter(l=>l.trim()); return lines.map(splitCsv); }
+
+/* --- column mapping -------------------------------------------------------
+   Old behaviour walked the sheet's columns and took the FIRST header that
+   merely *contained* a keyword, so "Campaign Name" hijacked Name, "Team
+   Leader" hijacked Product and "Serial Number" hijacked Phone. Now: exact
+   (normalised) header match first, for every field, and a column can only
+   feed one field. Loose matching is a last resort and never uses the
+   ambiguous words (number / contact / team).                              */
+const IMPORT_FIELDS=[
+  { field:'name',    exact:['name','fullname','full name','leadname','lead name','customer','customername','customer name','contactname','contact name','naam','client','clientname'], loose:['name'] },
+  { field:'phone',   exact:['phone','phoneno','phone no','phonenumber','phone number','mobile','mobileno','mobile no','mobilenumber','mobile number','whatsapp','whatsappno','whatsappnumber','contactno','contact no','contactnumber','contact number','contact','number'], loose:['phone','mobile','whatsapp'] },
+  { field:'email',   exact:['email','emailid','email id','emailaddress','email address','mail','e-mail'], loose:['email','mail'] },
+  { field:'city',    exact:['city','location','place','town','district'], loose:['city','location'] },
+  { field:'product', exact:['product','productcode','product code','productteam','product team','team','teamcode','team code','category','vertical','batch'], loose:['product','vertical'] },
+  { field:'source',  exact:['source','leadsource','lead source','channel','platform'], loose:['source','channel'] },
+];
+function normKey(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]/g,''); }
+function buildImportMap(headers){
+  const cols=headers.map((h,i)=>({raw:String(h==null?'':h).trim(), i, n:normKey(h)})).filter(c=>c.raw!=='');
+  const map={}, used=new Set();
+  for(const f of IMPORT_FIELDS){                              // pass 1: exact
+    const want=f.exact.map(normKey);
+    const hit=cols.find(c=>!used.has(c.i) && want.includes(c.n));
+    if(hit){ map[f.field]=hit; used.add(hit.i); }
+  }
+  for(const f of IMPORT_FIELDS){                              // pass 2: loose
+    if(map[f.field]) continue;
+    const hit=cols.find(c=>!used.has(c.i) && f.loose.some(n=>c.n.includes(normKey(n))));
+    if(hit){ map[f.field]=hit; used.add(hit.i); }
+  }
+  return map;
+}
+/* Resolve a sheet value to a real product code. Exact on code, then exact on
+   product name (punctuation/spacing-insensitive). NEVER a partial match —
+   that is what silently sent "TFD1" rows into TFD.                        */
+function resolveProduct(val){
   const teams=CFG().teams||{};
-  if(product){ const up=product.toUpperCase();
-    if(teams[up]) product=up;
-    else { const match=Object.keys(teams).find(c=>(teams[c].name||'').toLowerCase()===product.toLowerCase()); product=match||''; } }
-  return { name:g(['name','naam','full name','lead name','customer']), phone:g(['phone','mobile','number','contact','whatsapp']),
-    email:g(['email','mail','e-mail']), city:g(['city','location','place']), product, source:g(['source','channel','lead source']) };
+  const raw=String(val==null?'':val).trim();
+  if(!raw) return {code:'',reason:'blank'};
+  const want=normKey(raw);
+  for(const c of Object.keys(teams)) if(normKey(c)===want) return {code:c};
+  for(const c of Object.keys(teams)) if(normKey(teams[c].name)===want) return {code:c};
+  return {code:'',reason:raw};
+}
+function mapImportRow(cells,map,rowNo){
+  const at=f=>{ const c=map[f]; if(!c) return ''; const v=cells[c.i]; return String(v==null?'':v).trim(); };
+  const pr=resolveProduct(at('product'));
+  return { __row:rowNo, name:at('name'), phone:at('phone'), email:at('email'), city:at('city'),
+           source:at('source'), product:pr.code, __productRaw:at('product'), __productMiss:pr.code?'':pr.reason };
 }
 function parseImportFile(file){
-  if(!file)return; const info=document.getElementById('importInfo'); info.textContent='Reading file…';
+  if(!file)return;
+  const info=document.getElementById('importInfo'); const prev=document.getElementById('importPreview');
+  info.textContent='Reading file…'; if(prev) prev.innerHTML='';
+  IMPORT_ROWS=[]; IMPORT_BAD=[]; IMPORT_PRODUCT_MISSES={};
   const isCsv=/\.csv$/i.test(file.name); const reader=new FileReader();
   reader.onload=e=>{ try{
-      let rows=[];
-      if(isCsv){ rows=csvToRows(e.target.result); }
+      let matrix=[];
+      if(isCsv){ matrix=csvToMatrix(e.target.result); }
       else { if(typeof XLSX==='undefined'){ info.innerHTML='<span style="color:var(--red)">Excel reader did not load — check your internet or use a CSV.</span>'; return; }
         const data=new Uint8Array(e.target.result); const wb=XLSX.read(data,{type:'array'});
-        rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}); }
-      const allMapped=rows.map(mapImportRow).filter(r=>r.name);
-      IMPORT_ROWS=allMapped.filter(r=>String(r.phone||'').replace(/\D/g,'').length>=7);
-      const noPhone=allMapped.length-IMPORT_ROWS.length;
-      if(!IMPORT_ROWS.length){ info.innerHTML='<span style="color:var(--red)">No valid leads found — each row needs a Name and a Phone number.</span>'; return; }
-      info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' leads found ✓</b>'+(noPhone?' <span style="color:var(--red)">('+noPhone+' skipped — no phone)</span>':'')+' — click "Import".';
-      const btn=document.getElementById('doImportBtn'); btn.disabled=false; btn.style.opacity='1';
-    }catch(err){ info.innerHTML='<span style="color:var(--red)">File error: '+err.message+'</span>'; } };
+        matrix=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:'',blankrows:false}); }
+      if(matrix.length<2){ info.innerHTML='<span style="color:var(--red)">Sheet looks empty — need a header row plus at least one lead.</span>'; return; }
+      IMPORT_HEADERS=matrix[0].map(h=>String(h==null?'':h).trim());
+      IMPORT_MAP=buildImportMap(IMPORT_HEADERS);
+      if(!IMPORT_MAP.name||!IMPORT_MAP.phone){
+        info.innerHTML='<span style="color:var(--red)">Could not find a '+(!IMPORT_MAP.name?'<b>Name</b>':'')+(!IMPORT_MAP.name&&!IMPORT_MAP.phone?' and ':'')+(!IMPORT_MAP.phone?'<b>Phone</b>':'')+' column. Headers found: '+esc(IMPORT_HEADERS.join(', '))+'</span>'; return; }
+      const rows=[];
+      for(let i=1;i<matrix.length;i++){
+        const rowNo=i+1; const cells=matrix[i]||[];
+        if(cells.every(c=>String(c==null?'':c).trim()==='')) continue;
+        const r=mapImportRow(cells,IMPORT_MAP,rowNo);
+        if(!r.name){ IMPORT_BAD.push({row:rowNo,why:'no name'}); continue; }
+        if(String(r.phone||'').replace(/\D/g,'').length<7){ IMPORT_BAD.push({row:rowNo,name:r.name,why:'phone missing/invalid ("'+r.phone+'")'}); continue; }
+        if(r.__productMiss&&r.__productMiss!=='blank') IMPORT_PRODUCT_MISSES[r.__productMiss]=(IMPORT_PRODUCT_MISSES[r.__productMiss]||0)+1;
+        rows.push(r);
+      }
+      IMPORT_ROWS=rows;
+      renderImportPreview();
+    }catch(err){ info.innerHTML='<span style="color:var(--red)">File error: '+esc(err.message)+'</span>'; } };
   if(isCsv) reader.readAsText(file); else reader.readAsArrayBuffer(file);
 }
+function renderImportPreview(){
+  const info=document.getElementById('importInfo'); const prev=document.getElementById('importPreview');
+  const btn=document.getElementById('doImportBtn'); if(!info||!prev||!btn) return;
+  const forced=(document.getElementById('importProduct')||{}).value||'';
+  const ownerId=(document.getElementById('importOwner')||{}).value||'';
+  const poc=ownerId?userById(ownerId):null;
+  const noProd=IMPORT_ROWS.filter(r=>!r.product).length;
+  const willImport=forced?IMPORT_ROWS.length:IMPORT_ROWS.length-noProd;
+  const fields=['name','phone','email','city','product','source'];
+  const mapRows=fields.map(f=>{
+    const c=IMPORT_MAP[f];
+    const isProd=f==='product';
+    const val=c?esc(c.raw):'<span style="color:var(--red)">not found</span>';
+    const note=isProd&&forced?' <span class="pill">overridden → '+esc(forced)+'</span>':'';
+    return '<tr><td style="padding:2px 10px 2px 0"><b>'+f+'</b></td><td style="padding:2px 0">'+val+note+'</td></tr>';
+  }).join('');
+  const byProduct={}; IMPORT_ROWS.forEach(r=>{ const k=forced||r.product||'(none)'; byProduct[k]=(byProduct[k]||0)+1; });
+  const prodChips=Object.keys(byProduct).sort().map(k=>'<span class="pill" style="margin-right:6px">'+esc(k)+': '+byProduct[k]+'</span>').join('');
+  const missKeys=Object.keys(IMPORT_PRODUCT_MISSES);
+  const sample=IMPORT_ROWS.slice(0,5).map(r=>'<tr><td style="padding:2px 8px 2px 0">'+r.__row+'</td><td style="padding:2px 8px 2px 0">'+esc(r.name)+'</td><td style="padding:2px 8px 2px 0">'+esc(r.phone)+'</td><td style="padding:2px 8px 2px 0"><span class="pill">'+esc(forced||r.product||'—')+'</span></td><td style="padding:2px 0">'+esc(r.source||'Bulk Upload')+'</td></tr>').join('');
+
+  info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' valid rows ✓</b>'
+    +(IMPORT_BAD.length?' <span style="color:var(--red)">('+IMPORT_BAD.length+' rows dropped — no name / bad phone)</span>':'');
+
+  prev.innerHTML=`<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;font-size:13px">
+      <div style="font-weight:600;margin-bottom:6px">Column mapping — check this before importing</div>
+      <table style="font-size:12px">${mapRows}</table>
+      <div style="margin-top:8px">Products: ${prodChips||'—'}</div>
+      <div style="margin-top:6px">Assigned to: ${poc?'<b>'+esc(poc.name)+'</b>'+(poc.team?' <span class="pill">'+esc(poc.team)+'</span>':''):'round-robin'}</div>
+      ${(poc&&forced&&poc.team&&poc.team!==forced)?`<div style="margin-top:6px;color:var(--amber,#c78a00)">${esc(poc.name)} is on <b>${esc(poc.team)}</b>, not <b>${esc(forced)}</b>. The leads will still go to them — check this is what you want.</div>`:''}
+      ${(!forced&&missKeys.length)?`<div style="margin-top:8px;color:var(--red)">
+         Product values in the sheet that don't exist in this CRM: ${missKeys.map(k=>'<b>'+esc(k)+'</b> ('+IMPORT_PRODUCT_MISSES[k]+' rows)').join(', ')}.
+         Add the product in Sources → Routing, fix the sheet, or pick a product above.</div>`:''}
+      ${(!forced&&noProd)?`<div style="margin-top:6px;color:var(--red)"><b>${noProd}</b> rows have no usable product and will <b>not</b> be imported.</div>`:''}
+      <div style="font-weight:600;margin:10px 0 4px">First rows as the CRM will read them</div>
+      <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">product</td><td>source</td></tr>${sample}</table>
+      ${IMPORT_BAD.length?`<div style="margin-top:8px;color:var(--muted)">Dropped: ${esc(IMPORT_BAD.slice(0,6).map(b=>'row '+b.row+' — '+b.why).join(' · '))}${IMPORT_BAD.length>6?' …':''}</div>`:''}
+    </div>`;
+  btn.textContent=willImport?('Import '+willImport+' leads'+(forced?' into '+forced:'')+(poc?' → '+poc.name:'')):'Nothing to import';
+  btn.disabled=!willImport; btn.style.opacity=willImport?'1':'.5';
+}
+function importResultModal(r){
+  const line=(label,n,color)=>n?`<div style="margin:2px 0"><b style="color:${color||'inherit'}">${n}</b> ${label}</div>`:'';
+  const byProduct=Object.keys(r.byProduct||{}).sort().map(k=>'<span class="pill" style="margin-right:6px">'+esc(k)+': '+r.byProduct[k]+'</span>').join('')||'—';
+  const dups=(r.dupPhones||[]).slice(0,25).map(d=>'<tr><td style="padding:2px 8px 2px 0">'+d.row+'</td><td style="padding:2px 8px 2px 0">'+esc(d.name||'')+'</td><td style="padding:2px 8px 2px 0">'+esc(d.phone||'')+'</td><td style="padding:2px 8px 2px 0"><span class="pill">'+esc(d.existing_product||'')+'</span></td><td style="padding:2px 0">'+esc(d.existing_owner||'')+'</td></tr>').join('');
+  const probs=(r.problems||[]).slice(0,25).map(x=>'<div>row '+x.row+(x.name?' — '+esc(x.name):'')+' — '+esc(x.why)+'</div>').join('');
+  openModal(`<div class="modal" style="max-width:720px"><div class="modal-h"><h3>Import result</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b" style="font-size:13px">
+      ${line('leads imported + round-robin assigned',r.created,'var(--green)')}
+      ${line('skipped — phone already exists in the CRM',r.duplicates,'var(--amber,#c78a00)')}
+      ${line('skipped — no product / unknown product',r.badProduct,'var(--red)')}
+      ${line('skipped — no name or invalid phone',r.skipped,'var(--red)')}
+      <div style="margin:10px 0 4px;font-weight:600">Imported into</div><div>${byProduct}</div>
+      <div style="margin-top:6px">Assigned to: ${r.assignedTo?'<b>'+esc(r.assignedTo)+'</b> (single POC)':'round-robin'}</div>
+      ${dups?`<div style="margin:12px 0 4px;font-weight:600">Duplicate phones already in the CRM (showing ${Math.min(25,(r.dupPhones||[]).length)} of ${r.duplicates})</div>
+        <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">already in</td><td>owner</td></tr>${dups}</table>`:''}
+      ${probs?`<div style="margin:12px 0 4px;font-weight:600">Rejected rows${r.problemsTotal>25?' (showing 25 of '+r.problemsTotal+')':''}</div><div style="color:var(--red)">${probs}</div>`:''}
+      <button class="btn block" style="margin-top:14px" data-action="closemodal">Done</button>
+    </div></div>`);
+}
 function downloadSampleCsv(){
-  const csv='Name,Phone,Email,City,Product,Source\nRohan Sharma,+919812345678,rohan@example.com,Pune,MHS,Facebook\nPriya Verma,+919800000000,priya@example.com,Delhi,TFD,Website\n';
+  const teams=CFG().teams||{}; const codes=Object.keys(teams);
+  const c1=codes[0]||'MHS', c2=codes[1]||c1;
+  const csv='Name,Phone,Email,City,Product,Source\n'
+    +'Rohan Sharma,+919812345678,rohan@example.com,Pune,'+c1+',Facebook\n'
+    +'Priya Verma,+919800000000,priya@example.com,Delhi,'+c2+',Website\n'
+    +'# Product must be one of: '+codes.join(' / ')+'\n';
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='leads-sample.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
@@ -1135,6 +1271,15 @@ function bulkOwnerModal(){ const ids=Object.keys(selLeads); if(!ids.length){aler
     <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Transfer the ${ids.length} selected leads to an agent.</div>
       <div class="field"><label>Transfer to</label><select id="bo_to">${opt}</select></div>
       <button class="btn block" data-action="dobulkassign">Transfer ${ids.length} leads</button></div></div>`); }
+function bulkProductModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
+  const teams=CFG().teams||{};
+  const opt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
+  openModal(`<div class="modal"><div class="modal-h"><h3>\u{1F4E6} Change product — ${ids.length} leads</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Move the ${ids.length} selected leads into another product/team. Use this to correct leads that were imported under the wrong product.</div>
+      <div class="field"><label>Move to product</label><select id="bp_to">${opt}</select></div>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin:10px 0"><input type="checkbox" id="bp_reassign" checked style="margin-top:3px">
+        <span class="lead-sub">Also re-assign owners via round-robin to that product's agents (recommended — otherwise the leads stay with agents from the old team)</span></label>
+      <button class="btn block" data-action="dobulkproduct">Move ${ids.length} leads</button></div></div>`); }
 function bulkStageModal(){ const ids=Object.keys(selLeads); if(!ids.length){alert('Select some leads first');return;}
   const list=STATUS_LIST.filter(s=>!(state.user.role==='sales'&&s==='Fresh'));
   const opt=list.map(s=>`<option>${s}</option>`).join('');
@@ -1216,6 +1361,12 @@ document.addEventListener('click',async function(e){
     if(a==='changeowner'){ return bulkOwnerModal(); }
     if(a==='changestage'){ return bulkStageModal(); }
     if(a==='dobulkassign'){ const ids=Object.keys(selLeads); const to=document.getElementById('bo_to').value; const r=await api('/api/leads/bulk-assign','POST',{ids,to}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.moved||0)+' leads → '+r.to; return refresh(); }
+    if(a==='changeproduct'){ return bulkProductModal(); }
+    if(a==='dobulkproduct'){ const ids=Object.keys(selLeads); const product=document.getElementById('bp_to').value;
+      const reassign=document.getElementById('bp_reassign').checked;
+      const r=await api('/api/leads/bulk-product','POST',{ids,product,reassign}); if(r.error){alert(r.error);return;}
+      selLeads={}; closeModal();
+      state.toastMsg='✅ '+(r.moved||0)+' leads → '+r.product+(r.reassigned?' ('+r.reassigned+' re-assigned)':''); return refresh(); }
     if(a==='dobulkstatus'){ const ids=Object.keys(selLeads); const status=document.getElementById('bs_st').value; const r=await api('/api/leads/bulk-status','POST',{ids,status}); if(r.error){alert(r.error);return;} selLeads={}; closeModal(); state.toastMsg='✅ '+(r.changed||0)+' leads → '+status; return refresh(); }
     if(a==='bulkdelete'){ const ids=Object.keys(selLeads); if(!ids.length){ alert('Select some leads first'); return; }
       if(confirm('Delete '+ids.length+' selected lead(s)? They will be recorded in the delete report.')){
@@ -1224,8 +1375,13 @@ document.addEventListener('click',async function(e){
     if(a==='rptdate'){ state.reportDate=gv('rptDate'); return refresh(); }
     if(a==='import'){ return importModal(); }
     if(a==='samplecsv'){ return downloadSampleCsv(); }
-    if(a==='doimport'){ if(!IMPORT_ROWS.length) return; const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS}); closeModal();
-      state.toastMsg='✅ '+r.created+' leads imported + round-robin assigned'+(r.duplicates?' ('+r.duplicates+' duplicate phone skipped)':'')+(r.skipped?' ('+r.skipped+' invalid skipped)':''); IMPORT_ROWS=[]; return refresh(); }
+    if(a==='doimport'){ if(!IMPORT_ROWS.length) return;
+      const forced=(document.getElementById('importProduct')||{}).value||'';
+      const owner=(document.getElementById('importOwner')||{}).value||'';
+      const btn=document.getElementById('doImportBtn'); if(btn){ btn.disabled=true; btn.textContent='Importing…'; }
+      const r=await api('/api/leads/bulk','POST',{leads:IMPORT_ROWS,product:forced,owner_id:owner});
+      if(r.error){ if(btn){ btn.disabled=false; btn.textContent='Import'; } alert(r.error); return; }
+      IMPORT_ROWS=[]; closeModal(); importResultModal(r); return refresh(); }
     if(a==='addproduct'){ return addProductModal(); }
     if(a==='saveproduct'){
       const code=gv('np_code'), name=gv('np_name'); if(!code||!name){alert('Enter a code and a name');return;}
@@ -1293,6 +1449,7 @@ function updateSelUI(){ const n=Object.keys(selLeads).length;
 document.addEventListener('change',async function(e){
   const el=e.target;
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
+  if(el.id==='importProduct'||el.id==='importOwner'){ if(IMPORT_ROWS.length) renderImportPreview(); return; }
   if(el.id==='pageSize'){ state.leadPageSize=+el.value||25; state.leadPage=1; return render(); }
   if(el.classList&&el.classList.contains('rowown')){ const id=el.dataset.lead; const to=el.value;
     const r=await api('/api/leads/'+id,'PATCH',{owner_id:to}); if(r&&r.error){ alert(r.error); return refresh(); }
