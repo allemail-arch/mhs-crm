@@ -641,26 +641,47 @@ const server = http.createServer(async (req, res) => {
         if (deduped) { const o = userById(lead.owner_id); return send(res, 200, { duplicate: true, owner_name: o ? o.name : '—', lead: leadJSON(lead, true) }); }
         return send(res, 200, { ok: true, lead: leadJSON(lead, true) });
       }
-      // bulk import (Excel/CSV) → each lead round-robin auto-assigned
+      // bulk import (Excel/CSV) → each lead round-robin auto-assigned.
+      // A lead is NEVER imported into a guessed product: either the row names a
+      // real product or the whole import is forced into one chosen in the UI.
+      // Anything unresolvable is rejected and reported back, not defaulted.
       if (p === '/api/leads/bulk' && m === 'POST') {
         const b = await readBody(req);
         const list = Array.isArray(b.leads) ? b.leads : [];
         if (!list.length) return err(res, 400, 'no leads to import');
         if (list.length > 5000) return err(res, 400, 'max 5000 leads per import');
-        let created = 0, skipped = 0, duplicates = 0; const byAgent = {};
-        for (const row of list) {
-          if (!row || !String(row.name || '').trim()) { skipped++; continue; }
+        const teams = getTeams();
+        const forced = b.product ? String(b.product).trim() : '';
+        if (forced && !teams[forced]) return err(res, 400, 'unknown product: ' + forced);
+        let created = 0, skipped = 0, duplicates = 0, badProduct = 0;
+        const byAgent = {}, byProduct = {}, problems = [], dupPhones = [];
+        for (let i = 0; i < list.length; i++) {
+          const row = list[i] || {};
+          const rowNo = row.__row || (i + 2);
+          const nm = String(row.name || '').trim();
+          if (!nm) { skipped++; problems.push({ row: rowNo, why: 'no name' }); continue; }
+          if (normPhone(row.phone).length < 7) { skipped++; problems.push({ row: rowNo, name: nm, why: 'phone missing or invalid' }); continue; }
+          const wanted = forced || String(row.product || '').trim();
+          if (!wanted) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'no product in the row — choose a product for the import' }); continue; }
+          if (!teams[wanted]) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'product "' + wanted + '" does not exist in this CRM' }); continue; }
           const { lead, deduped } = createLead({
-            name: row.name, phone: row.phone, email: row.email, city: row.city,
-            product: row.product, source: row.source || 'Bulk Upload',
+            name: nm, phone: row.phone, email: row.email, city: row.city,
+            product: wanted, source: row.source || 'Bulk Upload',
             owner_id: row.owner_id || null,
           }, user.name + ' (import)', { autoAssign: true });
-          if (deduped) { duplicates++; continue; }
+          if (deduped) {
+            duplicates++;
+            if (dupPhones.length < 200) dupPhones.push({ row: rowNo, name: nm, phone: String(row.phone || ''),
+              existing_product: lead.product, existing_owner: userById(lead.owner_id)?.name || '—' });
+            continue;
+          }
           created++;
+          byProduct[wanted] = (byProduct[wanted] || 0) + 1;
           const on = userById(lead.owner_id)?.name || '—';
           byAgent[on] = (byAgent[on] || 0) + 1;
         }
-        return send(res, 200, { ok: true, created, skipped, duplicates, byAgent });
+        return send(res, 200, { ok: true, created, skipped, duplicates, badProduct, byAgent, byProduct,
+          dupPhones, problems: problems.slice(0, 200), problemsTotal: problems.length });
       }
       // global search — find any lead + who owns it (available to all roles)
       if (p === '/api/leads/search' && m === 'GET') {
