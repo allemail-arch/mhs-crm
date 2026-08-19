@@ -7,7 +7,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, hashPin, verifyPin, uid } = require('./db');
+const { db, hashPin, verifyPin, hashPassword, verifyPassword, uid,
+        nowIst, todayIst, addDaysIst, IST_NOW, IST_TODAY, DEFAULT_PASSWORD } = require('./db');
 const cfg = require('./config');
 const { sendWhatsApp, clickToCall, sendEmail } = require('./integrations');
 let wa = { init() {}, status() { return { available: false, connected: false, qr: null, error: 'module load failed' }; }, async logout() { return false; } };
@@ -49,8 +50,8 @@ function readBody(req) {
     req.on('end', () => { if (!d) return resolve({}); try { resolve(JSON.parse(d)); } catch { resolve({ __raw: d }); } });
   });
 }
-const today = () => new Date().toISOString().slice(0, 10);
-const addDays = (n) => { const t = new Date(); t.setDate(t.getDate() + n); return t.toISOString().slice(0, 10); };
+const today = () => todayIst();                    // IST calendar date
+const addDays = (n) => addDaysIst(n);              // IST calendar date, n days out
 const userById = (id) => db.prepare('SELECT * FROM users WHERE id=?').get(id);
 const activeSales = (team) => db.prepare("SELECT * FROM users WHERE role='sales' AND active=1 AND (?='' OR team=?) ORDER BY id").all(team || '', team || '');
 
@@ -62,10 +63,51 @@ function authUser(req) {
   return userById(p.uid);
 }
 
+/* who may bulk-upload leads (manager roles only — Sales never can) */
+const IMPORT_ROLES = ['admin', 'lead'];
+
+/* Resolve an Owner cell from an uploaded sheet to a real CRM user.
+   Accepts the person's email or their exact name (case / spacing
+   insensitive). NEVER a partial match — a fuzzy "Akshay" would be
+   ambiguous between two Akshays and silently hand leads to the wrong
+   agent, so an unresolvable value is reported instead of guessed. */
+function resolveOwnerCell(val) {
+  const raw = String(val == null ? '' : val).trim();
+  if (!raw) return { id: null, blank: true };
+  const key = raw.toLowerCase().replace(/\s+/g, ' ');
+  const flat = key.replace(/[^a-z0-9]/g, '');
+  const users = db.prepare('SELECT id,name,email,team,role,active FROM users').all();
+  let hit = users.find(u => String(u.email || '').trim().toLowerCase() === key);
+  if (!hit) {
+    const nameHits = users.filter(u => String(u.name || '').trim().toLowerCase().replace(/\s+/g, ' ') === key
+                                    || String(u.name || '').toLowerCase().replace(/[^a-z0-9]/g, '') === flat);
+    if (nameHits.length > 1) return { id: null, error: 'more than one user is named "' + raw + '" — use their email instead' };
+    hit = nameHits[0];
+  }
+  if (!hit) return { id: null, error: 'owner "' + raw + '" is not a user in this CRM' };
+  if (!hit.active) return { id: null, error: 'owner "' + raw + '" is a deactivated user' };
+  return { id: hit.id, user: hit };
+}
+
+/* Which product WhatsApp leads belong to (admin-settable, defaults to Pre Sales).
+   Every inbound WhatsApp message becomes a Pre Sales lead and is round-robined
+   ONLY among Pre Sales agents. */
+function presalesProduct() {
+  const s = db.prepare("SELECT value FROM settings WHERE key='whatsapp_product'").get();
+  const teams = getTeams();
+  if (s && s.value && teams[s.value]) return s.value;
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hit = Object.keys(teams).find(c => norm(c) === 'ps' || norm(c) === 'presales' || norm(teams[c].name) === 'presales');
+  return hit || 'PS';
+}
+
 /* ---------------- round-robin ---------------- */
-function nextAgent(team) {
+/* strict=true → never spill outside the team. Used for WhatsApp/Pre Sales:
+   better an unassigned lead an admin can see than a lead silently handed to
+   another product's agent. */
+function nextAgent(team, strict) {
   let list = activeSales(team);
-  if (!list.length) list = activeSales('');           // fallback: any sales
+  if (!list.length && !strict) list = activeSales('');   // fallback: any sales
   if (!list.length) return null;
   let row = db.prepare('SELECT idx FROM rr_state WHERE team=?').get(team) ;
   let idx = row ? row.idx : 0;
@@ -78,7 +120,7 @@ function nextAgent(team) {
 
 /* ---------------- lead helpers ---------------- */
 function logAct(leadId, title, sub, byName) {
-  db.prepare('INSERT INTO activities(lead_id,title,sub,by_name) VALUES(?,?,?,?)').run(leadId, title, sub || '', byName || 'System');
+  db.prepare(`INSERT INTO activities(lead_id,title,sub,by_name,created_at) VALUES(?,?,?,?,${IST_NOW})`).run(leadId, title, sub || '', byName || 'System');
 }
 function leadRow(id) { return db.prepare('SELECT * FROM leads WHERE id=?').get(id); }
 function leadJSON(row, withActivities) {
@@ -120,14 +162,15 @@ function createLead(data, byName, opts = {}) {
   let ownerId = data.owner_id || null;
   let assignNote = ownerId ? 'Assigned to ' + (userById(ownerId)?.name || ownerId) : '';
   if (!ownerId && (opts.autoAssign ?? autoOn('roundRobin'))) {
-    const a = nextAgent(product);
+    const a = nextAgent(product, opts.strictTeam);
     if (a) { ownerId = a.id; assignNote = 'Round-robin → ' + a.name; }
+    else if (opts.strictTeam) assignNote = '⚠️ No active agent in ' + product + ' — left unassigned';
   }
   const id = data.id || ('L' + uid('').slice(0, 8));
   const followup = autoOn('autoFollowup') ? addDays(1) : null;
   const score = data.score ?? (['Website', 'WhatsApp', 'Calendly'].includes(source) ? 70 : 55);
-  db.prepare(`INSERT INTO leads(id,name,phone,phone_norm,email,city,product,source,status,owner_id,website,score,converted,next_followup,external_id)
-              VALUES(?,?,?,?,?,?,?,?, 'Fresh', ?,?,?,0,?,?)`)
+  db.prepare(`INSERT INTO leads(id,name,phone,phone_norm,email,city,product,source,status,owner_id,website,score,converted,next_followup,external_id,created_at,updated_at)
+              VALUES(?,?,?,?,?,?,?,?, 'Fresh', ?,?,?,0,?,?, ${IST_NOW}, ${IST_NOW})`)
     .run(id, data.name || 'Unknown', data.phone || '', phoneNorm || null, data.email || '', data.city || '', product, source, ownerId, data.website || '', score, followup, data.external_id || null);
   logAct(id, 'Lead created', 'Source: ' + source, byName || 'System');
   if (assignNote) logAct(id, '🔁 ' + assignNote, '', 'System');
@@ -172,7 +215,7 @@ async function handleMiss(lead, byName) {
     steps.push('WhatsApp');
   }
   if (autoOn('autoRnrOnMiss')) {
-    db.prepare("UPDATE leads SET status='RNR', next_followup=?, updated_at=datetime('now') WHERE id=?").run(addDays(1), lead.id);
+    db.prepare("UPDATE leads SET status='RNR', next_followup=?, updated_at=datetime('now','+330 minutes') WHERE id=?").run(addDays(1), lead.id);
     logAct(lead.id, '↪️ Auto status → RNR', 'Reminder set for tomorrow', 'System');
     steps.push('RNR + reminder');
   }
@@ -209,6 +252,7 @@ function leadWhere(user, f) {
   if (f.source) { where += " AND source=?"; args.push(f.source); }
   if (f.owner) { where += " AND owner_id=?"; args.push(f.owner); }
   if (f.department) { where += " AND owner_id IN (SELECT id FROM users WHERE department=?)"; args.push(f.department); }
+  if (f.team) { where += " AND owner_id IN (SELECT id FROM users WHERE team=?)"; args.push(f.team); }
   return { where, args };
 }
 function getDepartments() {
@@ -231,7 +275,7 @@ function reportSummary(user, f) {
   // for a sales agent: today's own calls + talk time (for the dashboard card)
   let myTodayCalls = 0, myTodayTalk = 0;
   if (user.role === 'sales') {
-    const c = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(talktime),0) t FROM calls WHERE owner_id=? AND date(created_at)=date('now')").get(user.id);
+    const c = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(talktime),0) t FROM calls WHERE owner_id=? AND date(created_at)=date('now','+330 minutes')").get(user.id);
     myTodayCalls = c.n; myTodayTalk = c.t;
   }
   return { total, won, open, interested, conv: total ? Math.round(won / total * 100) : 0, bySource, funnel, myTodayCalls, myTodayTalk };
@@ -240,6 +284,7 @@ function reportAgents(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.team) sales = sales.filter(u => u.team === f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const cols = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   return sales.map(u => {
@@ -256,10 +301,11 @@ function reportActivity(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.team) sales = sales.filter(u => u.team === f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   // connected calls today + talk time, per owner (from the calls table)
   const rows = db.prepare(`SELECT owner_id oid, COUNT(*) c, SUM(talktime) t FROM calls
-      WHERE connected=1 AND date(created_at)=date('now') GROUP BY owner_id`).all();
+      WHERE connected=1 AND date(created_at)=date('now','+330 minutes') GROUP BY owner_id`).all();
   const cMap = Object.fromEntries(rows.map(r => [r.oid, r]));
   return sales.map(u => {
     const junk = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND status='Junk' AND deleted=0").get(u.id).n;
@@ -269,7 +315,7 @@ function reportActivity(user, f) {
     const resp = db.prepare(`SELECT AVG(mins) m FROM (
         SELECT (julianday(MIN(ca.created_at)) - julianday(l.created_at))*24*60 mins
         FROM leads l JOIN calls ca ON ca.lead_id=l.id
-        WHERE l.owner_id=? AND l.deleted=0 AND ca.connected=1 AND date(l.created_at)=date('now') GROUP BY l.id)`).get(u.id).m;
+        WHERE l.owner_id=? AND l.deleted=0 AND ca.connected=1 AND date(l.created_at)=date('now','+330 minutes') GROUP BY l.id)`).get(u.id).m;
     return { id: u.id, name: u.name, team: u.team, callsToday: c.c, talktime: c.t || 0,
       avgRespMin: resp ? Math.max(0, Math.round(resp)) : null, junk, working: c.c > 0 };
   });
@@ -277,11 +323,12 @@ function reportActivity(user, f) {
 // LSQ-style daily report: per agent — calls, connected, durations, pipeline counts, overdue tasks (for a date)
 function reportDaily(user, f) {
   f = f || {};
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIst();
   const from = f.from || f.date || today;
   const to = f.to || f.date || today;
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.team) sales = sales.filter(u => u.team === f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const rows = sales.map(u => {
@@ -292,7 +339,7 @@ function reportDaily(user, f) {
     const st = {};
     db.prepare("SELECT status, COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 GROUP BY status").all(u.id).forEach(r => st[r.status] = r.n);
     const totalOpp = db.prepare("SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0").get(u.id).n;
-    const overdue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
+    const overdue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now','+330 minutes') AND status IN ${OPEN}`).get(u.id).n;
     const conn = call.conn || 0, dur = call.dur || 0;
     return {
       id: u.id, name: u.name, email: u.email || '', team: u.team,
@@ -308,11 +355,12 @@ function reportFollowups(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
+  if (f.team) sales = sales.filter(u => u.team === f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const per = sales.map(u => {
-    const missed = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ${OPEN}`).get(u.id).n;
-    const todayDue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup = date('now') AND status IN ${OPEN}`).get(u.id).n;
+    const missed = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup IS NOT NULL AND next_followup < date('now','+330 minutes') AND status IN ${OPEN}`).get(u.id).n;
+    const todayDue = db.prepare(`SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0 AND next_followup = date('now','+330 minutes') AND status IN ${OPEN}`).get(u.id).n;
     return { id: u.id, name: u.name, team: u.team, missed, todayDue };
   });
   const teams = {};
@@ -323,7 +371,7 @@ function reportFollowups(user, f) {
 // attendance: who logged in today (present) vs not (absent), + department-wise
 function reportAttendance(user) {
   const users = db.prepare("SELECT id,name,role,team,department FROM users WHERE active=1 ORDER BY department, name").all();
-  const todays = db.prepare("SELECT user_id, MAX(created_at) last, COUNT(*) c FROM logins WHERE date(created_at)=date('now') GROUP BY user_id").all();
+  const todays = db.prepare("SELECT user_id, MAX(created_at) last, COUNT(*) c FROM logins WHERE date(created_at)=date('now','+330 minutes') GROUP BY user_id").all();
   const lastMap = Object.fromEntries(todays.map(r => [r.user_id, r]));
   const per = users.map(u => ({ id: u.id, name: u.name, role: u.role, team: u.team, department: u.department || '—',
     present: !!lastMap[u.id], lastLogin: lastMap[u.id] ? lastMap[u.id].last : null, logins: lastMap[u.id] ? lastMap[u.id].c : 0 }));
@@ -335,9 +383,11 @@ function reportAttendance(user) {
 // leads distribution: per agent, leads assigned in range (default today) + status breakdown
 function reportLeadsDist(user, f) {
   f = f || {};
-  const from = f.from || new Date().toISOString().slice(0, 10);
+  const from = f.from || todayIst();
   const to = f.to || from;
-  const sales = salesForUser(user);
+  let sales = salesForUser(user);
+  if (f.team) sales = sales.filter(u => u.team === f.team);
+  if (f.department) sales = sales.filter(u => u.department === f.department);
   const cols = cfg.STATUS_LIST;
   const per = sales.map(u => {
     const rows = db.prepare("SELECT status FROM leads WHERE owner_id=? AND deleted=0 AND date(created_at)>=date(?) AND date(created_at)<=date(?)").all(u.id, from, to);
@@ -420,32 +470,37 @@ const server = http.createServer(async (req, res) => {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         const contact = body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
         if (!msg) { res.writeHead(200); return res.end('EVENT_RECEIVED'); }
-        data = { name: contact?.profile?.name || 'WhatsApp Lead', phone: msg.from, source: 'WhatsApp', external_id: 'wa_' + msg.from };
+        data = { name: contact?.profile?.name || 'WhatsApp Lead', phone: msg.from, source: 'WhatsApp',
+                 product: presalesProduct(), external_id: 'wa_' + msg.from };
       }
       else if (p.startsWith('/webhooks/generic/')) { if (!checkWebhookSecret(url)) return err(res, 401, 'bad token'); data = { name: body.name, phone: body.phone, email: body.email, city: body.city, product: body.product, source: body.source || 'Manual', external_id: body.external_id }; }
       if (!data || !data.name) return err(res, 400, 'could not parse lead');
-      const { lead, deduped } = createLead(data, 'Webhook (' + p.split('/')[2] + ')');
+      const isWa = p === '/webhooks/whatsapp';
+      const { lead, deduped } = createLead(data, 'Webhook (' + p.split('/')[2] + ')', isWa ? { strictTeam: true } : {});
       return send(res, 200, { ok: true, deduped, lead_id: lead.id, owner: userById(lead.owner_id)?.name || null });
     }
 
-    // ---------- AUTH ----------
+    // ---------- AUTH (email + password) ----------
     if (p === '/api/login' && m === 'POST') {
       const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
       const now = Date.now();
       const rec = loginFails.get(ip) || { fails: 0, until: 0 };
-      if (rec.until > now) return err(res, 429, 'Too many wrong PINs. Try again in ' + Math.ceil((rec.until - now) / 1000) + 's.');
-      const { pin } = await readBody(req);
-      if (!pin) return err(res, 400, 'pin required');
-      const users = db.prepare('SELECT * FROM users WHERE active=1').all();
-      const u = users.find(x => { try { return verifyPin(pin, x.pin_hash, x.pin_salt); } catch { return false; } });
-      if (!u) {
+      if (rec.until > now) return err(res, 429, 'Too many failed attempts. Try again in ' + Math.ceil((rec.until - now) / 1000) + 's.');
+      const body = await readBody(req);
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      if (!email || !password) return err(res, 400, 'Email and password are both required');
+      const u = db.prepare('SELECT * FROM users WHERE active=1 AND lower(email)=?').get(email);
+      const ok = u && verifyPassword(password, u.pwd_hash, u.pwd_salt);
+      if (!ok) {
         rec.fails++;
         if (rec.fails >= LOGIN_MAX_FAILS) { rec.until = now + LOGIN_LOCK_MS; rec.fails = 0; }
         loginFails.set(ip, rec);
-        return err(res, 401, 'Wrong PIN');
+        // deliberately vague: never reveal whether the email exists
+        return err(res, 401, 'Wrong email or password');
       }
       loginFails.delete(ip);
-      try { db.prepare('INSERT INTO logins(user_id) VALUES(?)').run(u.id); } catch (e) {}
+      try { db.prepare(`INSERT INTO logins(user_id,created_at) VALUES(?,${IST_NOW})`).run(u.id); } catch (e) {}
       return send(res, 200, { token: signToken({ uid: u.id, role: u.role, team: u.team }), user: publicUser(u) });
     }
 
@@ -455,6 +510,18 @@ const server = http.createServer(async (req, res) => {
       if (!user) return err(res, 401, 'unauthorized');
 
       if (p === '/api/me' && m === 'GET') return send(res, 200, { user: publicUser(user), config: publicConfig() });
+      // every user changes their OWN password from their dashboard
+      if (p === '/api/me/password' && m === 'POST') {
+        const b = await readBody(req);
+        const current = String(b.current || ''), next = String(b.password || '');
+        if (!verifyPassword(current, user.pwd_hash, user.pwd_salt)) return err(res, 400, 'Your current password is wrong');
+        if (next.length < 6) return err(res, 400, 'New password must be at least 6 characters');
+        if (next === current) return err(res, 400, 'New password must be different from the current one');
+        if (next === DEFAULT_PASSWORD) return err(res, 400, 'Please choose something other than the default password');
+        const { hash, salt } = hashPassword(next);
+        db.prepare('UPDATE users SET pwd_hash=?, pwd_salt=?, pwd_changed=1 WHERE id=?').run(hash, salt, user.id);
+        return send(res, 200, { ok: true });
+      }
       if (p === '/api/config' && m === 'GET') return send(res, 200, publicConfig());
 
       // products / teams
@@ -492,24 +559,39 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         const up = db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)');
         for (const k of ['target_leads', 'target_interested', 'target_closed']) if (b[k] !== undefined) up.run(k, String(b[k]));
+        if (b.whatsapp_product !== undefined) {
+          const wp = String(b.whatsapp_product).trim();
+          if (!getTeams()[wp]) return err(res, 400, 'unknown product: ' + wp);
+          up.run('whatsapp_product', wp);
+        }
         return send(res, 200, { ok: true, settings: getSettings() });
       }
 
       // users
       if (p === '/api/users' && m === 'GET') {
-        const rows = db.prepare('SELECT id,name,email,role,team,department,phone,manager_id,active FROM users ORDER BY role, name').all();
-        const withLoad = rows.map(u => ({ ...u, leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0').get(u.id).n }));
+        const rows = db.prepare('SELECT id,name,email,role,team,department,phone,manager_id,active,pwd_changed FROM users ORDER BY role, name').all();
+        const withLoad = rows.map(u => ({ ...u, pwd_changed: !!u.pwd_changed, can_login: !!(u.email && String(u.email).includes('@')),
+          leads: db.prepare('SELECT COUNT(*) n FROM leads WHERE owner_id=? AND deleted=0').get(u.id).n }));
         return send(res, 200, { users: withLoad });
       }
       if (p === '/api/users' && m === 'POST') {
         if (user.role !== 'admin') return err(res, 403, 'admin only');
         const b = await readBody(req);
-        if (!b.name || !b.pin) return err(res, 400, 'name & pin required');
-        const { hash, salt } = hashPin(b.pin);
+        const email = String(b.email || '').trim().toLowerCase();
+        // email IS the login id now, so it is mandatory and must be unique
+        if (!b.name) return err(res, 400, 'name required');
+        if (!email || !email.includes('@')) return err(res, 400, 'A valid email is required — it is the login id');
+        if (db.prepare('SELECT id FROM users WHERE lower(email)=?').get(email)) return err(res, 409, 'That email is already used by another user');
+        const password = String(b.password || DEFAULT_PASSWORD);
+        if (password.length < 6) return err(res, 400, 'Password must be at least 6 characters');
+        const pw = hashPassword(password);
+        const pn = hashPin(b.pin || Math.floor(1000 + Math.random() * 9000));   // legacy NOT NULL columns
         const id = uid('u');
-        db.prepare('INSERT INTO users(id,name,email,role,team,department,phone,pin_hash,pin_salt) VALUES(?,?,?,?,?,?,?,?,?)')
-          .run(id, b.name, b.email || null, b.role || 'sales', b.team || 'MHS', b.department || null, b.phone || null, hash, salt);
-        return send(res, 200, { ok: true, id });
+        db.prepare(`INSERT INTO users(id,name,email,role,team,department,phone,pin_hash,pin_salt,pwd_hash,pwd_salt,pwd_changed,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,0,${IST_NOW})`)
+          .run(id, b.name, email, b.role || 'sales', b.team || 'MHS', b.department || null, b.phone || null,
+               pn.hash, pn.salt, pw.hash, pw.salt);
+        return send(res, 200, { ok: true, id, email, password });
       }
       // transfer a user's leads to another user (data transfer when agent leaves/changes)
       let um = p.match(/^\/api\/users\/([^/]+)\/transfer$/);
@@ -528,11 +610,23 @@ const server = http.createServer(async (req, res) => {
         if (user.role !== 'admin') return err(res, 403, 'admin only');
         const b = await readBody(req); const u = db.prepare('SELECT * FROM users WHERE id=?').get(um[1]);
         if (!u) return err(res, 404, 'user not found');
+        if (b.email !== undefined && String(b.email).trim() !== '') {
+          const em = String(b.email).trim().toLowerCase();
+          const clash = db.prepare('SELECT id FROM users WHERE lower(email)=? AND id<>?').get(em, u.id);
+          if (clash) return err(res, 409, 'That email is already used by another user');
+          b.email = em;
+        }
         const sets = [], args = [];
         for (const f of ['name', 'email', 'role', 'team', 'department', 'phone', 'manager_id']) {
           if (b[f] !== undefined) { sets.push(f + '=?'); args.push(b[f] === '' ? null : b[f]); }
         }
         if (b.pin) { const { hash, salt } = hashPin(b.pin); sets.push('pin_hash=?', 'pin_salt=?'); args.push(hash, salt); }
+        // admin password reset — the user is then nudged to change it themselves
+        if (b.password) {
+          if (String(b.password).length < 6) return err(res, 400, 'Password must be at least 6 characters');
+          const pw = hashPassword(String(b.password));
+          sets.push('pwd_hash=?', 'pwd_salt=?', 'pwd_changed=?'); args.push(pw.hash, pw.salt, 0);
+        }
         if (!sets.length) return send(res, 200, { ok: true });
         args.push(u.id);
         db.prepare('UPDATE users SET ' + sets.join(', ') + ' WHERE id=?').run(...args);
@@ -578,8 +672,8 @@ const server = http.createServer(async (req, res) => {
         const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
         if (!ids.length) return err(res, 400, 'no leads selected');
         let deleted = 0;
-        const del = db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now') WHERE id=? AND deleted=0");
-        const logDel = db.prepare('INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department) VALUES(?,?,?,?,?,?)');
+        const del = db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now','+330 minutes') WHERE id=? AND deleted=0");
+        const logDel = db.prepare(`INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department,created_at) VALUES(?,?,?,?,?,?,${IST_NOW})`);
         for (const id of ids) {
           const lead = leadRow(id);
           if (!lead || lead.deleted) continue;
@@ -611,7 +705,7 @@ const server = http.createServer(async (req, res) => {
         if (!teams[product]) return err(res, 400, 'unknown product: ' + product);
         const reassign = !!b.reassign;
         let moved = 0, reassigned = 0; const byAgent = {};
-        const upd = db.prepare("UPDATE leads SET product=?, updated_at=datetime('now') WHERE id=? AND deleted=0");
+        const upd = db.prepare("UPDATE leads SET product=?, updated_at=datetime('now','+330 minutes') WHERE id=? AND deleted=0");
         const updOwner = db.prepare('UPDATE leads SET owner_id=? WHERE id=?');
         for (const id of ids) {
           const lead = leadRow(id);
@@ -654,10 +748,11 @@ const server = http.createServer(async (req, res) => {
         if (q.get('source')) { where += ' AND source=?'; args.push(q.get('source')); }
         if (q.get('owner')) { where += ' AND owner_id=?'; args.push(q.get('owner')); }
         if (q.get('product')) { where += ' AND product=?'; args.push(q.get('product')); }
+        if (q.get('team')) { where += ' AND owner_id IN (SELECT id FROM users WHERE team=?)'; args.push(q.get('team')); }
         if (q.get('open')) { where += " AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
-        if (q.get('overdue')) { where += " AND next_followup IS NOT NULL AND next_followup < date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
-        if (q.get('duetoday')) { where += " AND next_followup = date('now') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
-         if (q.get('todayfresh')) { where += " AND status='Fresh' AND date(created_at)=date('now')"; }
+        if (q.get('overdue')) { where += " AND next_followup IS NOT NULL AND next_followup < date('now','+330 minutes') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
+        if (q.get('duetoday')) { where += " AND next_followup = date('now','+330 minutes') AND status IN ('Fresh','RNR','Follow Up','Interested')"; }
+         if (q.get('todayfresh')) { where += " AND status='Fresh' AND date(created_at)=date('now','+330 minutes')"; }
         if (q.get('dateFrom')) { where += " AND date(created_at)>=?"; args.push(q.get('dateFrom')); }
         if (q.get('dateTo')) { where += " AND date(created_at)<=?"; args.push(q.get('dateTo')); }
         if (q.get('q')) { where += ' AND (name LIKE ? OR phone LIKE ? OR city LIKE ? OR email LIKE ?)'; const t = '%' + q.get('q') + '%'; args.push(t, t, t, t); }
@@ -678,6 +773,8 @@ const server = http.createServer(async (req, res) => {
       // real product or the whole import is forced into one chosen in the UI.
       // Anything unresolvable is rejected and reported back, not defaulted.
       if (p === '/api/leads/bulk' && m === 'POST') {
+        // uploading leads is a manager job: Admin + Team Lead only, never Sales
+        if (!IMPORT_ROLES.includes(user.role)) return err(res, 403, 'Only Admin and Team Lead can upload leads');
         const b = await readBody(req);
         const list = Array.isArray(b.leads) ? b.leads : [];
         if (!list.length) return err(res, 400, 'no leads to import');
@@ -693,8 +790,8 @@ const server = http.createServer(async (req, res) => {
           if (!poc) return err(res, 400, 'unknown agent');
           if (!poc.active) return err(res, 400, poc.name + ' is not an active user');
         }
-        let created = 0, skipped = 0, duplicates = 0, badProduct = 0;
-        const byAgent = {}, byProduct = {}, problems = [], dupPhones = [];
+        let created = 0, skipped = 0, duplicates = 0, badProduct = 0, badOwner = 0, ownerNamed = 0;
+        const byAgent = {}, byProduct = {}, problems = [], dupPhones = [], ownerTeamWarn = [];
         for (let i = 0; i < list.length; i++) {
           const row = list[i] || {};
           const rowNo = row.__row || (i + 2);
@@ -704,11 +801,26 @@ const server = http.createServer(async (req, res) => {
           const wanted = forced || String(row.product || '').trim();
           if (!wanted) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'no product in the row — choose a product for the import' }); continue; }
           if (!teams[wanted]) { badProduct++; problems.push({ row: rowNo, name: nm, why: 'product "' + wanted + '" does not exist in this CRM' }); continue; }
+          /* Owner precedence: the single-POC dropdown wins, then the sheet's
+             Owner column, then round-robin. A named-but-unknown owner is a
+             mistake in the sheet, so the row is rejected rather than quietly
+             round-robined to someone else. */
+          let rowOwner = null;
+          if (!poc) {
+            const oc = resolveOwnerCell(row.owner != null ? row.owner : row.owner_id);
+            if (oc.error) { badOwner++; problems.push({ row: rowNo, name: nm, why: oc.error }); continue; }
+            if (oc.id) {
+              rowOwner = oc.user;
+              if (oc.user.team && oc.user.team !== wanted) {
+                if (ownerTeamWarn.length < 200) ownerTeamWarn.push({ row: rowNo, name: nm, owner: oc.user.name, owner_team: oc.user.team, product: wanted });
+              }
+            }
+          }
           const { lead, deduped } = createLead({
             name: nm, phone: row.phone, email: row.email, city: row.city,
             product: wanted, source: row.source || 'Bulk Upload',
-            owner_id: (poc && poc.id) || row.owner_id || null,
-          }, user.name + ' (import)', { autoAssign: !poc });
+            owner_id: (poc && poc.id) || (rowOwner && rowOwner.id) || null,
+          }, user.name + ' (import)', { autoAssign: !poc && !rowOwner });
           if (deduped) {
             duplicates++;
             if (dupPhones.length < 200) dupPhones.push({ row: rowNo, name: nm, phone: String(row.phone || ''),
@@ -716,12 +828,13 @@ const server = http.createServer(async (req, res) => {
             continue;
           }
           created++;
+          if (rowOwner) ownerNamed++;          // count only rows that actually became a lead
           byProduct[wanted] = (byProduct[wanted] || 0) + 1;
           const on = userById(lead.owner_id)?.name || '—';
           byAgent[on] = (byAgent[on] || 0) + 1;
         }
-        return send(res, 200, { ok: true, created, skipped, duplicates, badProduct, byAgent, byProduct,
-          assignedTo: poc ? poc.name : null,
+        return send(res, 200, { ok: true, created, skipped, duplicates, badProduct, badOwner, ownerNamed, byAgent, byProduct,
+          assignedTo: poc ? poc.name : null, ownerTeamWarn,
           dupPhones, problems: problems.slice(0, 200), problemsTotal: problems.length });
       }
       // global search — find any lead + who owns it (available to all roles)
@@ -737,8 +850,8 @@ const server = http.createServer(async (req, res) => {
       if (mm && m === 'DELETE') {
         const lead = leadRow(mm[1]); if (!lead) return err(res, 404, 'not found');
         if (!lead.deleted) {
-          db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now') WHERE id=?").run(user.id, lead.id);
-          db.prepare('INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department) VALUES(?,?,?,?,?,?)')
+          db.prepare("UPDATE leads SET deleted=1, deleted_by=?, deleted_at=datetime('now','+330 minutes') WHERE id=?").run(user.id, lead.id);
+          db.prepare(`INSERT INTO lead_deletions(lead_id,lead_name,phone,deleted_by,deleted_by_name,department,created_at) VALUES(?,?,?,?,?,?,${IST_NOW})`)
             .run(lead.id, lead.name, lead.phone, user.id, user.name, user.department || null);
         }
         return send(res, 200, { ok: true });
@@ -774,10 +887,10 @@ const server = http.createServer(async (req, res) => {
           const r = await clickToCall(user.phone || '', lead.phone);
           const connected = b.connected === undefined ? 1 : (b.connected ? 1 : 0);
           const talktime = Math.max(0, +b.talktime || 0);
-          db.prepare('INSERT INTO calls(lead_id,owner_id,connected,talktime) VALUES(?,?,?,?)').run(lead.id, lead.owner_id, connected, talktime);
+          db.prepare(`INSERT INTO calls(lead_id,owner_id,connected,talktime,created_at) VALUES(?,?,?,?,${IST_NOW})`).run(lead.id, lead.owner_id, connected, talktime);
           logAct(lead.id, '📞 Call ' + (connected ? 'connected' : 'not connected'), (connected ? 'talktime ' + talktime + 's • ' : '') + 'recording ON • location logged' + (r.simulated ? ' (simulated)' : ''), user.name);
         }
-        else if (act === 'miss') { db.prepare('INSERT INTO calls(lead_id,owner_id,connected,talktime) VALUES(?,?,0,0)').run(lead.id, lead.owner_id); const steps = await handleMiss(lead, user.name); return send(res, 200, { ok: true, steps, lead: leadJSON(leadRow(lead.id), true) }); }
+        else if (act === 'miss') { db.prepare(`INSERT INTO calls(lead_id,owner_id,connected,talktime,created_at) VALUES(?,?,0,0,${IST_NOW})`).run(lead.id, lead.owner_id); const steps = await handleMiss(lead, user.name); return send(res, 200, { ok: true, steps, lead: leadJSON(leadRow(lead.id), true) }); }
         else if (act === 'whatsapp') { const r = await sendWhatsApp(lead.phone, b.text || 'Hi ' + lead.name); logAct(lead.id, '🟢 WhatsApp ' + (r.sent ? 'sent' : 'opened (simulated)'), b.text || '', user.name); }
         else if (act === 'email') { const r = await sendEmail(lead.email, b.subject || 'From My Haul Store', b.text || ''); logAct(lead.id, '✉️ Email ' + (r.sent ? 'sent' : 'composed (simulated)'), b.subject || '', user.name); }
         return send(res, 200, { ok: true, lead: leadJSON(leadRow(lead.id), true) });
@@ -786,7 +899,8 @@ const server = http.createServer(async (req, res) => {
       // reports
       if (p.startsWith('/api/reports/') && m === 'GET') {
         const q = url.searchParams;
-        const f = { from: q.get('from'), to: q.get('to'), source: q.get('source'), department: q.get('department'), owner: q.get('owner'), date: q.get('date') };
+        const f = { from: q.get('from'), to: q.get('to'), source: q.get('source'), department: q.get('department'),
+                    owner: q.get('owner'), team: q.get('team'), date: q.get('date') };
         if (p === '/api/reports/daily') return send(res, 200, reportDaily(user, f));
         if (p === '/api/reports/summary') return send(res, 200, reportSummary(user, f));
         if (p === '/api/reports/agents') return send(res, 200, { agents: reportAgents(user, f) });
@@ -849,7 +963,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-function publicUser(u) { return { id: u.id, name: u.name, email: u.email, role: u.role, team: u.team }; }
+function publicUser(u) { return { id: u.id, name: u.name, email: u.email, role: u.role, team: u.team,
+  department: u.department, pwd_changed: !!u.pwd_changed }; }
 function getTeams() {
   const rows = db.prepare('SELECT code,name,color FROM teams WHERE active=1 ORDER BY code').all();
   const o = {}; rows.forEach(r => o[r.code] = { name: r.name, code: r.code, color: r.color }); return o;
@@ -867,7 +982,8 @@ function publicConfig() {
   const teams = getTeams();
   const at = getAgentTarget();
   return { teams, products: Object.keys(teams), sources: getSources(), statuses: cfg.STATUS_LIST,
-    departments: getDepartments(), teamTarget: at, agentTarget: at };
+    departments: getDepartments(), teamTarget: at, agentTarget: at,
+    whatsappProduct: presalesProduct(), importRoles: IMPORT_ROLES };
 }
 
 // auto-seed on first boot (fresh deploy) so the app is usable immediately
@@ -885,7 +1001,8 @@ server.listen(PORT, () => {
 try {
   wa.init(({ name, phone, text }) => {
     try {
-      const { lead } = createLead({ name, phone, source: 'WhatsApp', external_id: 'wa_' + phone }, 'WhatsApp (live)');
+      const { lead } = createLead({ name, phone, source: 'WhatsApp', product: presalesProduct(),
+        external_id: 'wa_' + phone }, 'WhatsApp (live)', { strictTeam: true });
       if (lead && text) logAct(lead.id, '🟢 WhatsApp: "' + String(text).slice(0, 280) + '"', 'Incoming message', name);
     } catch (e) { console.warn('wa lead create failed:', e.message); }
   });

@@ -10,6 +10,26 @@ const { DEFAULT_CONNECTORS, DEFAULT_AUTOMATION, DEFAULT_SOURCES, DEFAULT_SETTING
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data.db');
 const db = new DatabaseSync(DB_PATH);
 
+/* ============================================================
+   TIME ZONE — the whole CRM runs on IST (Asia/Kolkata, UTC+5:30)
+   SQLite's datetime('now') is UTC, and the server may sit in any
+   region (Railway = UTC), so every timestamp used to land 5h30m
+   behind real Indian clock time: leads created after 05:30 IST
+   showed yesterday's date, "today" counters reset at 05:30, and
+   activity timelines showed the wrong hour.
+   Rule from here on: ALL stored timestamps are IST wall-clock.
+   - JS side  → nowIst() / todayIst() / addDaysIst()
+   - SQL side → datetime('now','+330 minutes') via IST_NOW / IST_TODAY
+   ============================================================ */
+const IST_MINUTES = 330;
+const IST_SHIFT = "'+330 minutes'";
+const IST_NOW = `datetime('now',${IST_SHIFT})`;     // 'YYYY-MM-DD HH:MM:SS' IST
+const IST_TODAY = `date('now',${IST_SHIFT})`;       // 'YYYY-MM-DD' IST
+const istDate = () => new Date(Date.now() + IST_MINUTES * 60000);
+function nowIst() { return istDate().toISOString().slice(0, 19).replace('T', ' '); }
+function todayIst() { return istDate().toISOString().slice(0, 10); }
+function addDaysIst(n) { return new Date(Date.now() + IST_MINUTES * 60000 + (+n || 0) * 86400000).toISOString().slice(0, 10); }
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
@@ -22,7 +42,7 @@ db.exec(`
     pin_hash   TEXT NOT NULL,
     pin_salt   TEXT NOT NULL,
     active     INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','+330 minutes'))
   );
 
   CREATE TABLE IF NOT EXISTS leads (
@@ -40,8 +60,8 @@ db.exec(`
     converted     INTEGER DEFAULT 0,
     next_followup TEXT,                  -- ISO date (yyyy-mm-dd) or null
     external_id   TEXT,                  -- id from source (e.g. Meta leadgen id) for dedupe
-    created_at    TEXT DEFAULT (datetime('now')),
-    updated_at    TEXT DEFAULT (datetime('now'))
+    created_at    TEXT DEFAULT (datetime('now','+330 minutes')),
+    updated_at    TEXT DEFAULT (datetime('now','+330 minutes'))
   );
 
   CREATE TABLE IF NOT EXISTS activities (
@@ -50,7 +70,7 @@ db.exec(`
     title      TEXT NOT NULL,
     sub        TEXT,
     by_name    TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','+330 minutes'))
   );
 
   CREATE TABLE IF NOT EXISTS connectors (
@@ -96,14 +116,14 @@ db.exec(`
     owner_id   TEXT,
     connected  INTEGER DEFAULT 1,
     talktime   INTEGER DEFAULT 0,   -- seconds
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','+330 minutes'))
   );
   CREATE INDEX IF NOT EXISTS idx_calls_owner ON calls(owner_id);
 
   CREATE TABLE IF NOT EXISTS logins (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','+330 minutes'))
   );
   CREATE INDEX IF NOT EXISTS idx_logins_user ON logins(user_id);
 
@@ -115,7 +135,7 @@ db.exec(`
     deleted_by    TEXT,
     deleted_by_name TEXT,
     department    TEXT,
-    created_at    TEXT DEFAULT (datetime('now'))
+    created_at    TEXT DEFAULT (datetime('now','+330 minutes'))
   );
 
   CREATE INDEX IF NOT EXISTS idx_leads_owner  ON leads(owner_id);
@@ -152,6 +172,65 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_leads_phonenorm ON leads(phone_nor
 // manager_id: which Team Lead a sales agent reports to (for TL-scoped data)
 try { db.exec('ALTER TABLE users ADD COLUMN manager_id TEXT'); } catch (e) {}
 
+/* ---------- login is now EMAIL + PASSWORD (the PIN keypad is gone) ---------- */
+for (const col of ['pwd_hash TEXT', 'pwd_salt TEXT', 'pwd_changed INTEGER DEFAULT 0']) {
+  try { db.exec('ALTER TABLE users ADD COLUMN ' + col); } catch (e) {}
+}
+const DEFAULT_PASSWORD = '123456';
+/* Give every existing user the default password ONCE. One scrypt call is
+   reused for all of them (same known default → a per-user salt buys nothing
+   and 200 scrypt runs would stall boot for ~20s). Each user re-salts the
+   moment they change their own password.                                   */
+try {
+  const flag = db.prepare("SELECT value FROM settings WHERE key='pwd_default_v1'").get();
+  if (!flag) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync(DEFAULT_PASSWORD, salt, 32).toString('hex');
+    const r = db.prepare("UPDATE users SET pwd_hash=?, pwd_salt=?, pwd_changed=0 WHERE pwd_hash IS NULL OR pwd_hash=''").run(hash, salt);
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('pwd_default_v1','1')").run();
+    console.log('password migration: ' + r.changes + ' users set to the default password (' + DEFAULT_PASSWORD + ')');
+  }
+} catch (e) { console.error('password migration failed:', e.message); }
+
+/* ---------- Pre Sales product/team — WhatsApp leads route only here ---------- */
+try {
+  const existing = db.prepare('SELECT code,name FROM teams').all();
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  let ps = existing.find(t => norm(t.code) === 'ps' || norm(t.code) === 'presales' || norm(t.name) === 'presales');
+  if (!ps) {
+    db.prepare("INSERT OR IGNORE INTO teams(code,name,color) VALUES('PS','Pre Sales','#00b8d9')").run();
+    ps = { code: 'PS' };
+    console.log("created product 'PS' (Pre Sales) for WhatsApp lead routing");
+  }
+  db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES('whatsapp_product',?)").run(ps.code);
+} catch (e) { console.error('pre-sales team setup failed:', e.message); }
+
+/* ---------- one-time UTC → IST shift of every stored timestamp ----------
+   Rows written before this release hold UTC. Shifting them +5:30 puts the
+   whole database on one clock so "today", date ranges and timelines agree.
+   Guarded by a settings flag so it can never run twice.                   */
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key='tz_ist_v1'").get();
+  if (!done) {
+    const shift = (table, col) => {
+      try {
+        const r = db.prepare(`UPDATE ${table} SET ${col}=datetime(${col},'+330 minutes')
+                              WHERE ${col} IS NOT NULL AND length(${col})>=19`).run();
+        return r.changes;
+      } catch (e) { return 0; }
+    };
+    let total = 0;
+    total += shift('leads', 'created_at') + shift('leads', 'updated_at') + shift('leads', 'deleted_at');
+    total += shift('activities', 'created_at');
+    total += shift('calls', 'created_at');
+    total += shift('logins', 'created_at');
+    total += shift('lead_deletions', 'created_at');
+    total += shift('users', 'created_at');
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('tz_ist_v1','1')").run();
+    console.log('timezone migration: ' + total + ' timestamps shifted UTC → IST');
+  }
+} catch (e) { console.error('timezone migration failed:', e.message); }
+
 /* ---------- helpers ---------- */
 function hashPin(pin, salt) {
   salt = salt || crypto.randomBytes(16).toString('hex');
@@ -165,5 +244,17 @@ function verifyPin(pin, hash, salt) {
 function uid(prefix) {
   return (prefix || 'id') + '_' + crypto.randomBytes(6).toString('hex');
 }
+/* passwords use the same scrypt scheme as the old PINs, own columns */
+function hashPassword(pwd, salt) {
+  salt = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pwd), salt, 32).toString('hex');
+  return { hash, salt };
+}
+function verifyPassword(pwd, hash, salt) {
+  if (!hash || !salt) return false;
+  const h = crypto.scryptSync(String(pwd), salt, 32).toString('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(hash)); } catch { return false; }
+}
 
-module.exports = { db, hashPin, verifyPin, uid, DB_PATH };
+module.exports = { db, hashPin, verifyPin, hashPassword, verifyPassword, uid, DB_PATH,
+  nowIst, todayIst, addDaysIst, IST_NOW, IST_TODAY, IST_MINUTES, DEFAULT_PASSWORD };

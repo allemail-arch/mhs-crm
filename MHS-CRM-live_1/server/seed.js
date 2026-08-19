@@ -3,7 +3,7 @@
    Run:  npm run seed         (only seeds if DB is empty)
          node seed.js reset   (wipes leads/users and re-seeds)
    ============================================================ */
-const { db, hashPin, uid } = require('./db');
+const { db, hashPin, hashPassword, uid, DEFAULT_PASSWORD } = require('./db');
 
 const USERS = [
   { id: 'u_admin', name: 'Abhishek Vyas',    email: 'abhishek@myhaulstore.com',  role: 'admin', team: '-',   pin: '1111' },
@@ -44,11 +44,12 @@ function seed(reset) {
   const existing = db.prepare('SELECT COUNT(*) n FROM users').get().n;
   if (existing > 0 && !reset) { console.log('users already present (' + existing + ') — skip. Use `node seed.js reset` to force.'); return; }
 
-  const insUser = db.prepare(`INSERT INTO users(id,name,email,role,team,department,pin_hash,pin_salt,active) VALUES(?,?,?,?,?,?,?,?,1)`);
+  const insUser = db.prepare(`INSERT INTO users(id,name,email,role,team,department,pin_hash,pin_salt,pwd_hash,pwd_salt,pwd_changed,active) VALUES(?,?,?,?,?,?,?,?,?,?,0,1)`);
+  const pw = hashPassword(DEFAULT_PASSWORD);          // everyone starts on the default password
   for (const u of USERS) {
     const { hash, salt } = hashPin(u.pin);
     const dept = u.role === 'admin' ? 'Admin' : u.role === 'lead' ? 'Sales Manager' : u.team + ' Sales';
-    insUser.run(u.id, u.name, u.email, u.role, u.team, dept, hash, salt);
+    insUser.run(u.id, u.name, u.email, u.role, u.team, dept, hash, salt, pw.hash, pw.salt);
   }
   console.log('seeded ' + USERS.length + ' users');
 

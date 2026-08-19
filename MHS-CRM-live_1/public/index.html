@@ -193,18 +193,10 @@ const STATUS={
   'Not Interested':{cls:'b-notint',dot:'#c0392b',open:false},'Junk':{cls:'b-junk',dot:'#868e96',open:false},
   'Closed Won':{cls:'b-won',dot:'#0b8a43',open:false,won:true},'Closed Lost':{cls:'b-lost',dot:'#c0392b',open:false}};
 const STATUS_LIST=Object.keys(STATUS);
-/* demo quick-login PINs (remove in production) */
-const DEMO=[['u_admin','Abhishek Vyas — Admin','1111'],['u_lead','Rahul Mehta — Team Lead','2222'],
-  ['s01','Abhishek Bhadoriya — Sales','0001'],['s02','Aishwarya Deshmukh — Sales','0002'],
-  ['s03','Akshay Bhosale — Sales','0003'],['s04','Akshay Sangle — Sales','0004'],
-  ['s05','Ankit Singh — Sales','0005'],['s06','Anu Sharma — Sales','0006'],
-  ['s07','Anurag Das — Sales','0007'],['s08','Arati Innani — Sales','0008'],
-  ['s09','Babitha Bhuwalia — Sales','0009'],['s10','Prachi Nair — Sales','0010']];
-
-const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, pin:'', loginErr:'',
+const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, loginEmail:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
-  filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:''},
-  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
+  filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:'',team:''},
+  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
@@ -217,18 +209,24 @@ function assignableAgents(){
   return salesUsers();
 }
 const userById=id=>state.users.find(u=>u.id===id);
+/* only Admin + Team Lead may bulk-upload leads (server enforces this too) */
+function canImport(){ const r=state.user&&state.user.role; const roles=(CFG().importRoles)||['admin','lead']; return roles.includes(r); }
 const initials=n=>String(n||'').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
 /* escape ALL user-provided text before putting it in innerHTML (prevents XSS) */
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function parseD(s){ if(!s)return null; return new Date(String(s).length<=10?s+'T00:00:00':String(s).replace(' ','T')); }
 function fmtDate(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}):'—'; }
+function fmtTime(s){ const d=parseD(s); return d?d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):''; }
 function fmtDateTime(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):''; }
 function isOverdue(s){ if(!s)return false; const t=new Date();t.setHours(0,0,0,0); const x=parseD(s);x.setHours(0,0,0,0); return x<t; }
 function isToday(s){ if(!s)return false; const t=new Date(),x=parseD(s); return x.getDate()===t.getDate()&&x.getMonth()===t.getMonth()&&x.getFullYear()===t.getFullYear(); }
 function scoreTier(v){ if(v>=75)return{t:'Hot',c:'#e5484d'}; if(v>=55)return{t:'Warm',c:'#f5a623'}; return{t:'Cold',c:'#6b7488'}; }
 function fmtDur(s){ s=+s||0; if(!s)return '—'; const m=Math.floor(s/60),ss=s%60; return m?m+'m '+ss+'s':ss+'s'; }
-const todayStr=()=>new Date().toISOString().slice(0,10);
-function loginTime(s){ if(!s)return '—'; try{ return new Date(String(s).replace(' ','T')+'Z').toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }catch(_){ return s; } }
+function todayStr(){ const d=new Date(); const p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+/* Timestamps from the API are IST wall-clock (see server db.js) — parse them
+   as-is. Appending 'Z' used to treat them as UTC and add another 5h30m. */
+function loginTime(s){ if(!s)return '—'; const d=parseD(s); return d?d.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):s; }
 function downloadCSV(filename, rows){ const csv=rows.map(r=>r.map(c=>{c=String(c==null?'':c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c;}).join(',')).join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
 /* Excel (.xlsx) — one or more sheets. sheets=[{name, rows:[[...]]}] */
@@ -295,8 +293,8 @@ function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
 function dlButtons(kind){ return `<button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="xlsx">⬇ Excel</button> <button class="btn ghost sm" data-action="dlx" data-kind="${kind}" data-fmt="pdf">⬇ PDF</button>`; }
 /* selected lead ids for bulk actions on the leads list */
 let selLeads={};
-const LEADS_HEAD=['Name','Phone','Email','City','Product','Source','Status','Owner','Follow-up','Created'];
-function leadRowArr(l){ return [l.name,l.phone||'',l.email||'',l.city||'',l.product||'',l.source||'',l.status,l.owner_name||'',l.next_followup||'',(l.created_at||'').slice(0,10)]; }
+const LEADS_HEAD=['Name','Phone','Email','City','Lead Source','Lead Created Date','Product','Owner','Status','Next Follow-up'];
+function leadRowArr(l){ return [l.name,l.phone||'',l.email||'',l.city||'',l.source||'',(l.created_at||'').replace('T',' ').slice(0,16),l.product||'',l.owner_name||'',l.status,l.next_followup||'']; }
 function exportLeads(fmt){ const ls=state.leads||[]; if(!ls.length){ state.toastMsg='No leads to download'; return render(); }
   const body=ls.map(leadRowArr); const name='leads-'+todayStr();
   if(fmt==='pdf') downloadPDF(name+'.pdf','Leads ('+ls.length+')',[{head:LEADS_HEAD,body}],[{name:'Leads',rows:[LEADS_HEAD,...body]}]);
@@ -344,7 +342,7 @@ async function loadRouteData(){
   const r=state.route, role=state.user.role;
   if(r==='dashboard'){
     const f=state.dashFilter; const qs=new URLSearchParams();
-    ['from','to','source','department','owner'].forEach(k=>{ if(f[k]) qs.set(k,f[k]); });
+    ['from','to','source','department','owner','team'].forEach(k=>{ if(f[k]) qs.set(k,f[k]); });
     const q=qs.toString()?'?'+qs.toString():'';
     state.reports.summary=await api('/api/reports/summary'+q);
     if(role==='sales'){ state.leads=(await api('/api/leads')).leads; }
@@ -361,12 +359,15 @@ async function loadRouteData(){
   } else if(r==='settings'){
     state.settings=(await api('/api/settings')).settings;
   } else if(r==='reports'){
-    const dq=new URLSearchParams(); if(state.dailyFrom)dq.set('from',state.dailyFrom); if(state.dailyTo)dq.set('to',state.dailyTo); if(state.dailyOwner)dq.set('owner',state.dailyOwner);
+    const dq=new URLSearchParams(); if(state.dailyFrom)dq.set('from',state.dailyFrom); if(state.dailyTo)dq.set('to',state.dailyTo);
+    if(state.dailyOwner)dq.set('owner',state.dailyOwner); if(state.dailyTeam)dq.set('team',state.dailyTeam);
+    const tq=state.dailyTeam?('team='+encodeURIComponent(state.dailyTeam)):'';
     state.reports.daily=await api('/api/reports/daily'+(dq.toString()?'?'+dq.toString():''));
     state.reports.recordings=(await api('/api/calls')).calls||[];
     state.reports.attendance=await api('/api/reports/attendance');
-    state.reports.leadsDist=await api('/api/reports/leads-distribution'+(state.reportDate?('?from='+state.reportDate+'&to='+state.reportDate):''));
-    state.reports.followups=await api('/api/reports/followups');
+    const ldq=new URLSearchParams(); if(state.reportDate){ ldq.set('from',state.reportDate); ldq.set('to',state.reportDate); } if(state.dailyTeam) ldq.set('team',state.dailyTeam);
+    state.reports.leadsDist=await api('/api/reports/leads-distribution'+(ldq.toString()?'?'+ldq.toString():''));
+    state.reports.followups=await api('/api/reports/followups'+(tq?'?'+tq:''));
     state.reports.deletions=await api('/api/reports/deletions');
     state.reports.usersList=await api('/api/reports/users');
   } else if(r==='calls'){
@@ -388,16 +389,19 @@ async function go(route,params){ state.route=route; state.params=params||{}; win
   try{ await loadRouteData(); }catch(e){ return; } render(); }
 async function refresh(){ try{ await loadRouteData(); }catch(e){ return; } render(); }
 
-async function doLogin(pin){
-  let r; try{ r=await api('/api/login','POST',{pin}); }catch(e){ state.loginErr='Could not connect to the server'; state.pin=''; render(); return; }
-  if(r.error){ state.loginErr=r.error+'. Please try again.'; state.pin=''; render(); return; }
+async function doLogin(email,password){
+  state.loginEmail=email; state.busy=true; state.loginErr=''; render();
+  let r; try{ r=await api('/api/login','POST',{email,password}); }
+  catch(e){ state.busy=false; state.loginErr='Could not connect to the server'; render(); return; }
+  state.busy=false;
+  if(r.error){ state.loginErr=r.error; render(); return; }
   state.token=r.token; state.user=r.user;
   const me=await api('/api/me'); setCfg(me.config);
-  state.users=(await api('/api/users')).users;
-  state.route='dashboard'; state.pin=''; state.loginErr='';
+  try{ state.users=(await api('/api/users')).users; }catch(_){ state.users=[]; }
+  state.route='dashboard'; state.loginErr='';
   await loadRouteData(); render();
 }
-function logout(){ state.token=null; state.user=null; state.pin=''; state.route='dashboard'; render(); }
+function logout(){ state.token=null; state.user=null; state.route='dashboard'; render(); }
 
 /* ============================================================ RENDER ============================================================ */
 const root=()=>document.getElementById('root');
@@ -417,18 +421,18 @@ function render(){
 }
 
 function renderLogin(){
-  const dots=[0,1,2,3].map(i=>`<div class="pin-dot ${i<state.pin.length?'on':''}"></div>`).join('');
-  const keys=[1,2,3,4,5,6,7,8,9].map(n=>`<button class="key" data-key="${n}">${n}</button>`).join('');
   return `<div class="login-wrap"><div class="login-card">
     <div class="brand"><div class="logo">M<b>H</b>S</div><h1>MHS CRM</h1></div>
     <div class="sub">Lead Management • Sales • Reports</div>
-    <div style="font-weight:700;margin-bottom:4px">Enter your PIN</div>
-    <div class="pin-display">${dots}</div>
-    <div class="keypad">${keys}
-      <button class="key fn" data-key="clear">Clear</button>
-      <button class="key" data-key="0">0</button>
-      <button class="key fn" data-key="back">⌫</button></div>
+    <div style="text-align:left;margin-top:6px">
+      <div class="field"><label>Work email</label>
+        <input id="lg_email" type="email" autocomplete="username" placeholder="you@myhaulstore.com" value="${esc(state.loginEmail||'')}"></div>
+      <div class="field"><label>Password</label>
+        <input id="lg_pwd" type="password" autocomplete="current-password" placeholder="••••••"></div>
+    </div>
+    <button class="btn block" data-action="dologin" ${state.busy?'disabled style="opacity:.6"':''}>${state.busy?'Signing in…':'Sign in'}</button>
     <div class="login-err">${state.loginErr||''}</div>
+    <div class="lead-sub" style="margin-top:10px">First time? Your password is <b>123456</b> — change it right after signing in from <b>My Account</b>.</div>
   </div></div>`;
 }
 
@@ -445,17 +449,21 @@ function renderShell(inner){
   const top=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}">${n[1]}</a>`).join('');
   const bot=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}"><span class="bi">${n[2]}</span>${n[1]}</a>`).join('');
   const addBtn=(u.role!=='lead')?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
+  /* still on the shared default password → keep it visible until they change it */
+  const pwdNudge=(u.pwd_changed===false)?`<div class="filters" style="background:#fff4e5;border:1px solid #ffd8a8;border-radius:10px;padding:10px 12px;margin-bottom:12px;align-items:center">
+      <span>🔒 You are still using the default password <b>123456</b>. Anyone who knows your email can sign in as you.</span>
+      <div class="spacer"></div><button class="btn sm" data-action="myaccount">Change it now</button></div>`:'';
   return `<div class="app">
     <div class="topbar"><div class="logo">M<b>H</b>S</div><div class="topnav">${top}</div>
       <input id="globalSearch" placeholder="🔍 Search leads — who owns it?" value="${esc(state.searchQ||'')}" style="flex:1;max-width:280px;margin-left:10px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff">
       <div class="spacer"></div>
       ${addBtn}
       <button class="btn ghost sm" data-action="refreshnow" title="Refresh now">🔄</button>
-      <div class="userchip"><div class="avatar">${initials(u.name)}</div>
+      <div class="userchip" data-action="myaccount" title="My Account — change password"><div class="avatar">${initials(u.name)}</div>
         <div><div class="nm">${esc(u.name)}</div><div class="rl">${roleLabel}</div></div></div>
       <button class="btn ghost sm" data-action="logout">Logout</button>
     </div>
-    <div class="content">${inner}</div>
+    <div class="content">${pwdNudge}${inner}</div>
     <div class="botnav">${bot}</div></div>`;
 }
 function pageContent(){
@@ -598,11 +606,13 @@ function renderDashboard(){
   const srcOpt=srcList().map(s=>`<option value="${s}" ${f.source===s?'selected':''}>${s}</option>`).join('');
   const depOpt=(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.department===d?'selected':''}>${esc(d)}</option>`).join('');
   const empOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
-  const active=f.from||f.to||f.source||f.department||f.owner;
+  const teamOpt=Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${f.team===k?'selected':''}>${teamName(k)}</option>`).join('');
+  const active=f.from||f.to||f.source||f.department||f.owner||f.team;
   const dateBar=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px">
     <span class="lead-sub" style="font-weight:700">📅 From</span><input type="date" id="dfrom" value="${esc(f.from)}">
     <span class="lead-sub" style="font-weight:700">To</span><input type="date" id="dto" value="${esc(f.to)}">
     <select id="dsource"><option value="">All Sources</option>${srcOpt}</select>
+    <select id="dteam"><option value="">All Teams</option>${teamOpt}</select>
     <select id="ddept"><option value="">All Departments</option>${depOpt}</select>
     <select id="downer"><option value="">All Employees</option>${empOpt}</select>
     <button class="btn sm" data-action="applydash">Apply Filter</button>${active?' <button class="btn ghost sm" data-action="cleardash">Clear</button>':''}</div>`;
@@ -648,23 +658,27 @@ function renderLeads(mineOnly){
   const page=Math.min(Math.max(1,state.leadPage||1), totalPages); state.leadPage=page;
   const start=(page-1)*size; const pageLs=ls.slice(start, start+size);
   const ownSel=l=>`<select class="rowown" data-lead="${l.id}" data-action="pick" style="max-width:150px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:#fff">${assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}${l.owner_id&&!assignableAgents().some(u=>u.id===l.owner_id)?`<option value="${l.owner_id}" selected>${esc(l.owner_name||'—')}</option>`:''}</select>`;
-    const rows=pageLs.map(l=>{const fu=state.filters.todayfresh?'':(l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—');
+    const rows=pageLs.map(l=>{const fu=l.next_followup?`<span class="${isOverdue(l.next_followup)?'overdue':''}">${fmtDate(l.next_followup)}${isToday(l.next_followup)?' • today':''}</span>`:'—';
     return `<tr data-lead="${l.id}"><td data-action="pick" style="width:34px;text-align:center"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></td>
       <td><div class="lead-nm">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone)} • ${esc(l.city)}</div></td>
-      <td>${srcChip(l.source)}</td><td><span class="pill">${esc(l.product)}</span></td><td>${badge(l.status)}</td>
-      <td>${showOwner?ownSel(l):fu}</td>${showOwner?`<td>${fu}</td>`:''}</tr>`;}).join('');
+      <td>${srcChip(l.source)}</td>
+      <td><div>${fmtDate(l.created_at)}</div><div class="lead-sub">${fmtTime(l.created_at)}</div></td>
+      <td><span class="pill">${esc(l.product)}</span></td>
+      <td>${showOwner?ownSel(l):esc(l.owner_name||'—')}</td>
+      <td>${badge(l.status)}</td>
+      <td>${fu}</td></tr>`;}).join('');
   const allChecked=pageLs.length&&pageLs.every(l=>selLeads[l.id]);
-  const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th><th>Lead</th><th>Source</th><th>Product</th><th>Status</th>
-            <th>${showOwner?'Owner (assign)':(state.filters.todayfresh?'':'Follow-up')}</th>${showOwner?`<th>${state.filters.todayfresh?'':'Follow-up'}</th>`:''}</tr></thead>
-    <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
-    const cards=pageLs.map(l=>{const fu=state.filters.todayfresh?'':(l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'');
+  const table=`<div class="table-wrap"><table><thead><tr><th style="width:34px;text-align:center"><input type="checkbox" id="selAll" ${allChecked?'checked':''}></th>
+            <th>Lead</th><th>Lead Source</th><th>Lead Created Date</th><th>Product</th><th>Owner${showOwner?' (assign)':''}</th><th>Status</th><th>Next Follow-up</th></tr></thead>
+    <tbody>${rows||`<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No leads found</td></tr>`}</tbody></table></div>`;
+    const cards=pageLs.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
     return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
-      <div class="row">${srcChip(l.source)}<span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
+      <div class="row">${srcChip(l.source)}<span class="meta">🗓️ ${fmtDateTime(l.created_at)}</span><span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
       <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
         <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
         <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
-  const importBtn = `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>`;
+  const importBtn = canImport() ? `<div class="spacer"></div><button class="btn ghost" data-action="import">⬆ Import Excel/CSV</button>` : '';
   const selN=Object.keys(selLeads).length;
   const tools=`<div class="filters" style="gap:8px;margin-bottom:10px;align-items:center">
     <button class="btn ghost sm" data-action="dl-leads" data-fmt="xlsx">⬇ Excel</button>
@@ -719,7 +733,7 @@ function renderUsers(){
   const roleB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
   const actionBtns=u=>isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${u.id}">Edit</button> <button class="btn ghost sm" data-action="transferuser" data-uid="${u.id}">Transfer leads</button> <button class="btn ghost sm" style="color:var(--red);border-color:#ffd0cf" data-action="deleteuser" data-uid="${u.id}">Delete</button>`:'';
   const rows=state.users.map(u=>`<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="avatar">${initials(u.name)}</div>
-    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${esc(u.email||'no email yet')}</div></div></div></td>
+    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${u.email?esc(u.email):'<span style="color:var(--red)">no email — cannot sign in</span>'}${u.email&&u.pwd_changed===false?' <span class="pill" style="background:#fff4e5;color:#c77700">default password</span>':''}</div></div></div></td>
     <td>${roleB(u.role)}</td><td>${u.team==='-'?'—':`<span class="pill">${teamName(u.team)}</span>`}</td>
     <td class="num">${u.role==='sales'?u.leads:'—'}</td>${isAdmin?`<td>${actionBtns(u)}</td>`:''}</tr>`).join('');
   const cards=state.users.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
@@ -775,6 +789,11 @@ function renderSettings(){
         <div class="field"><label>Interested target</label><input id="st_int" type="number" value="${t.interested}"></div>
         <div class="field"><label>Closed Won target</label><input id="st_closed" type="number" value="${t.closed}"></div>
         <button class="btn block" data-action="savesettings">Save targets</button></div></div>
+      <div class="panel"><div class="panel-h">🟢 WhatsApp lead routing</div><div class="panel-b">
+        <div class="field"><label>WhatsApp leads go to this product / team</label>
+          <select id="st_waprod">${Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${(CFG().whatsappProduct||'')===k?'selected':''}>${teamName(k)}</option>`).join('')}</select></div>
+        <div class="lead-sub">Every inbound WhatsApp message becomes a lead in this product and is round-robined <b>only</b> among its agents. If that team has no active agent, the lead is left unassigned (visible here) rather than handed to another team.</div>
+        <button class="btn block" style="margin-top:10px" data-action="savewaprod">Save WhatsApp routing</button></div></div>
       <div class="panel"><div class="panel-h">📥 Lead Sources<button class="btn sm" data-action="addsource">+ Add Source</button></div>
         <div class="panel-b"><div style="display:flex;flex-wrap:wrap">${srcRows}</div>
         <div class="lead-sub" style="margin-top:10px">Add a new source (Instagram, Justdial, etc.) — it will appear in the lead form and reports.</div></div></div>
@@ -792,13 +811,14 @@ function renderSettings(){
 /* ---------------- BULK IMPORT (Excel/CSV) ---------------- */
 let IMPORT_ROWS=[], IMPORT_MAP={}, IMPORT_HEADERS=[], IMPORT_BAD=[], IMPORT_PRODUCT_MISSES={};
 function importModal(){
+  if(!canImport()){ alert('Only Admin and Team Lead can upload leads.'); return; }
   IMPORT_ROWS=[]; IMPORT_MAP={}; IMPORT_HEADERS=[]; IMPORT_BAD=[]; IMPORT_PRODUCT_MISSES={};
   const teams=CFG().teams||{};
   const prOpt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
   const agOpt=assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)}${u.team?' ('+esc(u.team)+')':''}</option>`).join('');
   openModal(`<div class="modal" style="max-width:720px"><div class="modal-h"><h3>⬆ Import Leads — Excel / CSV</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source</b>. <b>Name and Phone are required.</b> Each lead is <b>auto-assigned</b> to agents via round-robin. Duplicate phone numbers are skipped (one phone = one lead).</div>
+      <div class="lead-sub" style="margin-bottom:10px">Columns (in any order): <b>Name, Phone, Email, City, Product, Source, Owner</b>. <b>Name and Phone are required.</b> Put a person's name or login email in <b>Owner</b> to hand that row to them; leave it blank for round-robin. Duplicate phone numbers are skipped (one phone = one lead).</div>
       <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="margin-bottom:12px;width:100%">
       <div class="field"><label>Product / Team for this import</label>
         <select id="importProduct">
@@ -809,10 +829,10 @@ function importModal(){
       </div>
       <div class="field"><label>Assign these leads to</label>
         <select id="importOwner">
-          <option value="">Round-robin across the product's agents (default)</option>
+          <option value="">Use the sheet's Owner column, else round-robin (default)</option>
           ${agOpt}
         </select>
-        <div class="lead-sub" style="margin-top:4px">Choose one person to hand the <b>whole file</b> to a single POC instead of splitting it round-robin.</div>
+        <div class="lead-sub" style="margin-top:4px">Choose one person to hand the <b>whole file</b> to a single POC — this <b>overrides</b> the sheet's Owner column.</div>
       </div>
       <div id="importInfo" class="lead-sub" style="min-height:18px;margin:10px 0"></div>
       <div id="importPreview"></div>
@@ -841,6 +861,7 @@ const IMPORT_FIELDS=[
   { field:'city',    exact:['city','location','place','town','district'], loose:['city','location'] },
   { field:'product', exact:['product','productcode','product code','productteam','product team','team','teamcode','team code','category','vertical','batch'], loose:['product','vertical'] },
   { field:'source',  exact:['source','leadsource','lead source','channel','platform'], loose:['source','channel'] },
+  { field:'owner',   exact:['owner','ownername','owner name','owneremail','owner email','assignto','assign to','assignedto','assigned to','assignee','agent','agentname','agent name','poc','salesperson','sales person','salesagent','executive','telecaller','counsellor','counselor'], loose:['owner','assign','agent','poc'] },
 ];
 function normKey(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]/g,''); }
 function buildImportMap(headers){
@@ -870,11 +891,30 @@ function resolveProduct(val){
   for(const c of Object.keys(teams)) if(normKey(teams[c].name)===want) return {code:c};
   return {code:'',reason:raw};
 }
+/* Preview-side owner resolution so mistakes are visible BEFORE importing.
+   Same rule as the server: email or exact name only, never a partial match. */
+function resolveOwnerLocal(val){
+  const raw=String(val==null?'':val).trim();
+  if(!raw) return {id:null,name:'',miss:''};
+  const key=raw.toLowerCase().replace(/\s+/g,' '); const flat=key.replace(/[^a-z0-9]/g,'');
+  const us=state.users||[];
+  let hit=us.find(u=>String(u.email||'').trim().toLowerCase()===key);
+  if(!hit){ const nm=us.filter(u=>String(u.name||'').trim().toLowerCase().replace(/\s+/g,' ')===key
+                                || String(u.name||'').toLowerCase().replace(/[^a-z0-9]/g,'')===flat);
+    if(nm.length>1) return {id:null,name:'',miss:raw+' (more than one user has this name — use their email)'};
+    hit=nm[0]; }
+  if(!hit) return {id:null,name:'',miss:raw};
+  if(hit.active===0) return {id:null,name:'',miss:raw+' (deactivated user)'};
+  return {id:hit.id,name:hit.name,miss:''};
+}
 function mapImportRow(cells,map,rowNo){
   const at=f=>{ const c=map[f]; if(!c) return ''; const v=cells[c.i]; return String(v==null?'':v).trim(); };
   const pr=resolveProduct(at('product'));
+  const ow=resolveOwnerLocal(at('owner'));
   return { __row:rowNo, name:at('name'), phone:at('phone'), email:at('email'), city:at('city'),
-           source:at('source'), product:pr.code, __productRaw:at('product'), __productMiss:pr.code?'':pr.reason };
+           source:at('source'), product:pr.code, owner:at('owner'),
+           __productRaw:at('product'), __productMiss:pr.code?'':pr.reason,
+           __ownerRaw:at('owner'), __ownerId:ow.id, __ownerName:ow.name, __ownerMiss:ow.miss };
 }
 function parseImportFile(file){
   if(!file)return;
@@ -916,18 +956,25 @@ function renderImportPreview(){
   const poc=ownerId?userById(ownerId):null;
   const noProd=IMPORT_ROWS.filter(r=>!r.product).length;
   const willImport=forced?IMPORT_ROWS.length:IMPORT_ROWS.length-noProd;
-  const fields=['name','phone','email','city','product','source'];
+  const fields=['name','phone','email','city','product','source','owner'];
   const mapRows=fields.map(f=>{
     const c=IMPORT_MAP[f];
     const isProd=f==='product';
-    const val=c?esc(c.raw):'<span style="color:var(--red)">not found</span>';
-    const note=isProd&&forced?' <span class="pill">overridden → '+esc(forced)+'</span>':'';
+    const optional=(f==='owner'||f==='email'||f==='city'||f==='source');
+    const val=c?esc(c.raw):(optional?'<span class="lead-sub">not in this sheet</span>':'<span style="color:var(--red)">not found</span>');
+    let note=isProd&&forced?' <span class="pill">overridden → '+esc(forced)+'</span>':'';
+    if(f==='owner'&&c&&poc) note=' <span class="pill">ignored → whole file goes to '+esc(poc.name)+'</span>';
     return '<tr><td style="padding:2px 10px 2px 0"><b>'+f+'</b></td><td style="padding:2px 0">'+val+note+'</td></tr>';
   }).join('');
   const byProduct={}; IMPORT_ROWS.forEach(r=>{ const k=forced||r.product||'(none)'; byProduct[k]=(byProduct[k]||0)+1; });
   const prodChips=Object.keys(byProduct).sort().map(k=>'<span class="pill" style="margin-right:6px">'+esc(k)+': '+byProduct[k]+'</span>').join('');
   const missKeys=Object.keys(IMPORT_PRODUCT_MISSES);
-  const sample=IMPORT_ROWS.slice(0,5).map(r=>'<tr><td style="padding:2px 8px 2px 0">'+r.__row+'</td><td style="padding:2px 8px 2px 0">'+esc(r.name)+'</td><td style="padding:2px 8px 2px 0">'+esc(r.phone)+'</td><td style="padding:2px 8px 2px 0"><span class="pill">'+esc(forced||r.product||'—')+'</span></td><td style="padding:2px 0">'+esc(r.source||'Bulk Upload')+'</td></tr>').join('');
+  const ownerRows=IMPORT_MAP.owner?IMPORT_ROWS.filter(r=>r.__ownerRaw):[];
+  const ownerOk=ownerRows.filter(r=>r.__ownerId).length;
+  const ownerMissMap={}; ownerRows.filter(r=>!r.__ownerId).forEach(r=>{ ownerMissMap[r.__ownerMiss]=(ownerMissMap[r.__ownerMiss]||0)+1; });
+  const ownerMissKeys=Object.keys(ownerMissMap);
+  const ownerCell=r=>poc?esc(poc.name):(r.__ownerId?esc(r.__ownerName):(r.__ownerRaw?'<span style="color:var(--red)">'+esc(r.__ownerRaw)+' ✕</span>':'<span class="lead-sub">round-robin</span>'));
+  const sample=IMPORT_ROWS.slice(0,5).map(r=>'<tr><td style="padding:2px 8px 2px 0">'+r.__row+'</td><td style="padding:2px 8px 2px 0">'+esc(r.name)+'</td><td style="padding:2px 8px 2px 0">'+esc(r.phone)+'</td><td style="padding:2px 8px 2px 0"><span class="pill">'+esc(forced||r.product||'—')+'</span></td><td style="padding:2px 8px 2px 0">'+esc(r.source||'Bulk Upload')+'</td><td style="padding:2px 0">'+ownerCell(r)+'</td></tr>').join('');
 
   info.innerHTML='<b style="color:var(--green)">'+IMPORT_ROWS.length+' valid rows ✓</b>'
     +(IMPORT_BAD.length?' <span style="color:var(--red)">('+IMPORT_BAD.length+' rows dropped — no name / bad phone)</span>':'');
@@ -936,14 +983,17 @@ function renderImportPreview(){
       <div style="font-weight:600;margin-bottom:6px">Column mapping — check this before importing</div>
       <table style="font-size:12px">${mapRows}</table>
       <div style="margin-top:8px">Products: ${prodChips||'—'}</div>
-      <div style="margin-top:6px">Assigned to: ${poc?'<b>'+esc(poc.name)+'</b>'+(poc.team?' <span class="pill">'+esc(poc.team)+'</span>':''):'round-robin'}</div>
+      <div style="margin-top:6px">Assigned to: ${poc?'<b>'+esc(poc.name)+'</b>'+(poc.team?' <span class="pill">'+esc(poc.team)+'</span>':''):(IMPORT_MAP.owner?'the sheet\'s <b>Owner</b> column, round-robin where it is blank':'round-robin')}</div>
+      ${(!poc&&IMPORT_MAP.owner)?`<div style="margin-top:6px">Owner column: <b style="color:var(--green)">${ownerOk} matched</b>${ownerMissKeys.length?` · <b style="color:var(--red)">${ownerRows.length-ownerOk} unmatched</b>`:''}${(IMPORT_ROWS.length-ownerRows.length)?` · ${IMPORT_ROWS.length-ownerRows.length} blank → round-robin`:''}</div>`:''}
+      ${(!poc&&ownerMissKeys.length)?`<div style="margin-top:6px;color:var(--red)">These Owner values are not users in this CRM: ${ownerMissKeys.slice(0,10).map(k=>'<b>'+esc(k)+'</b> ('+ownerMissMap[k]+' rows)').join(', ')}${ownerMissKeys.length>10?' …':''}.
+         Those rows will be <b>rejected</b> — fix the sheet (use their login email), or pick one person above to take the whole file.</div>`:''}
       ${(poc&&forced&&poc.team&&poc.team!==forced)?`<div style="margin-top:6px;color:var(--amber,#c78a00)">${esc(poc.name)} is on <b>${esc(poc.team)}</b>, not <b>${esc(forced)}</b>. The leads will still go to them — check this is what you want.</div>`:''}
       ${(!forced&&missKeys.length)?`<div style="margin-top:8px;color:var(--red)">
          Product values in the sheet that don't exist in this CRM: ${missKeys.map(k=>'<b>'+esc(k)+'</b> ('+IMPORT_PRODUCT_MISSES[k]+' rows)').join(', ')}.
          Add the product in Sources → Routing, fix the sheet, or pick a product above.</div>`:''}
       ${(!forced&&noProd)?`<div style="margin-top:6px;color:var(--red)"><b>${noProd}</b> rows have no usable product and will <b>not</b> be imported.</div>`:''}
       <div style="font-weight:600;margin:10px 0 4px">First rows as the CRM will read them</div>
-      <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">product</td><td>source</td></tr>${sample}</table>
+      <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">product</td><td style="padding-right:8px">source</td><td>owner</td></tr>${sample}</table>
       ${IMPORT_BAD.length?`<div style="margin-top:8px;color:var(--muted)">Dropped: ${esc(IMPORT_BAD.slice(0,6).map(b=>'row '+b.row+' — '+b.why).join(' · '))}${IMPORT_BAD.length>6?' …':''}</div>`:''}
     </div>`;
   btn.textContent=willImport?('Import '+willImport+' leads'+(forced?' into '+forced:'')+(poc?' → '+poc.name:'')):'Nothing to import';
@@ -959,9 +1009,12 @@ function importResultModal(r){
       ${line('leads imported + round-robin assigned',r.created,'var(--green)')}
       ${line('skipped — phone already exists in the CRM',r.duplicates,'var(--amber,#c78a00)')}
       ${line('skipped — no product / unknown product',r.badProduct,'var(--red)')}
+      ${line('skipped — Owner in the sheet is not a CRM user',r.badOwner,'var(--red)')}
+      ${line('assigned from the sheet\'s Owner column',r.ownerNamed,'var(--blue)')}
       ${line('skipped — no name or invalid phone',r.skipped,'var(--red)')}
       <div style="margin:10px 0 4px;font-weight:600">Imported into</div><div>${byProduct}</div>
-      <div style="margin-top:6px">Assigned to: ${r.assignedTo?'<b>'+esc(r.assignedTo)+'</b> (single POC)':'round-robin'}</div>
+      <div style="margin-top:6px">Assigned to: ${r.assignedTo?'<b>'+esc(r.assignedTo)+'</b> (single POC)':(r.ownerNamed?'the sheet\'s Owner column + round-robin for blanks':'round-robin')}</div>
+      ${(r.ownerTeamWarn&&r.ownerTeamWarn.length)?`<div style="margin-top:8px;color:var(--amber,#c78a00)">${r.ownerTeamWarn.length} row(s) went to an owner from a different team than the product — e.g. ${esc(r.ownerTeamWarn.slice(0,3).map(w=>w.owner+' ('+w.owner_team+') → '+w.product).join(', '))}. Check this was intended.</div>`:''}
       ${dups?`<div style="margin:12px 0 4px;font-weight:600">Duplicate phones already in the CRM (showing ${Math.min(25,(r.dupPhones||[]).length)} of ${r.duplicates})</div>
         <table style="font-size:12px"><tr style="color:var(--muted)"><td style="padding-right:8px">row</td><td style="padding-right:8px">name</td><td style="padding-right:8px">phone</td><td style="padding-right:8px">already in</td><td>owner</td></tr>${dups}</table>`:''}
       ${probs?`<div style="margin:12px 0 4px;font-weight:600">Rejected rows${r.problemsTotal>25?' (showing 25 of '+r.problemsTotal+')':''}</div><div style="color:var(--red)">${probs}</div>`:''}
@@ -971,10 +1024,13 @@ function importResultModal(r){
 function downloadSampleCsv(){
   const teams=CFG().teams||{}; const codes=Object.keys(teams);
   const c1=codes[0]||'MHS', c2=codes[1]||c1;
-  const csv='Name,Phone,Email,City,Product,Source\n'
-    +'Rohan Sharma,+919812345678,rohan@example.com,Pune,'+c1+',Facebook\n'
-    +'Priya Verma,+919800000000,priya@example.com,Delhi,'+c2+',Website\n'
-    +'# Product must be one of: '+codes.join(' / ')+'\n';
+  const ag=(state.users||[]).filter(u=>u.role==='sales')[0];
+  const agEmail=(ag&&ag.email)||'agent@myhaulstore.com';
+  const csv='Name,Phone,Email,City,Product,Source,Owner\n'
+    +'Rohan Sharma,+919812345678,rohan@example.com,Pune,'+c1+',Facebook,'+agEmail+'\n'
+    +'Priya Verma,+919800000000,priya@example.com,Delhi,'+c2+',Website,\n'
+    +'# Product must be one of: '+codes.join(' / ')+'\n'
+    +'# Owner = the agent\'s login email or their exact name. Leave it blank for round-robin.\n';
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='leads-sample.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
@@ -1055,12 +1111,14 @@ function renderReports(){
       <td class="num">${r.notInterested}</td><td class="num">${r.won}</td><td class="num ${r.overdue>0?'overdue':''}">${r.overdue}</td></tr>`;});
   const totalRow=`<tr style="background:#fff3e0;font-weight:800"><td>TOTAL</td><td class="num">${T.calls}</td><td class="num">${T.connected}</td><td class="num">${durS(T.duration)}</td><td class="num">—</td><td class="num">${T.totalOpp}</td><td class="num">${T.fresh}</td><td class="num">${T.rnr}</td><td class="num">${T.followup}</td><td class="num">${T.interested}</td><td class="num">${T.notInterested}</td><td class="num">${T.won}</td><td class="num">${T.overdue}</td></tr>`;
   const dFrom=state.dailyFrom||dr.from||todayStr(), dTo=state.dailyTo||dr.to||todayStr();
-  const agentOpts='<option value="">All agents</option>'+salesUsers().map(u=>`<option value="${u.id}" ${state.dailyOwner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
+  const agentOpts='<option value="">All agents</option>'+salesUsers().filter(u=>!state.dailyTeam||u.team===state.dailyTeam).map(u=>`<option value="${u.id}" ${state.dailyOwner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
+  const teamOpts='<option value="">All teams</option>'+Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${state.dailyTeam===k?'selected':''}>${teamName(k)}</option>`).join('');
   const dRangeLbl=dFrom===dTo?esc(dFrom):esc(dFrom)+' → '+esc(dTo);
   const dailyPanel=`<div class="panel"><div class="panel-h" style="flex-wrap:wrap;gap:8px"><div>📅 Daily Report — <b>${dRangeLbl}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue)</span></div>
     <span style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
       <label class="lead-sub">From</label><input type="date" id="dailyFrom" value="${esc(dFrom)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
       <label class="lead-sub">To</label><input type="date" id="dailyTo" value="${esc(dTo)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
+      <select id="dailyTeam" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${teamOpts}</select>
       <select id="dailyOwner" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${agentOpts}</select>
       <button class="btn sm" data-action="dailyrange">Apply</button> ${dl2('dl-daily')}</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Owner name</th><th style="text-align:right"># Calls</th><th style="text-align:right"># Connected</th><th style="text-align:right">Total Duration</th><th style="text-align:right">Avg Duration</th><th style="text-align:right">Total Opp</th><th style="text-align:right">Fresh</th><th style="text-align:right">RNR</th><th style="text-align:right">Follow Up</th><th style="text-align:right">Interested</th><th style="text-align:right">Not Interested</th><th style="text-align:right">Won</th><th style="text-align:right">Overdue Tasks</th></tr></thead>
@@ -1227,14 +1285,14 @@ function addUserModal(){
   const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}">${teamName(k)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Team Member</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="lead-sub" style="margin-bottom:10px">Tip: you can create a placeholder like "User 1" with just a name + PIN now, and add the real name/email later from Edit.</div>
+      <div class="lead-sub" style="margin-bottom:10px">The <b>email is the login id</b>, so it is required. Leave the password blank to start them on the default <b>123456</b> — they change it themselves from My Account.</div>
       <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nu_name" placeholder="e.g. User 1"></div>
-      <div class="field"><label>Email <span class="lead-sub">(optional — add later)</span></label><input id="nu_email"></div>
+      <div class="field"><label>Email (login id) <span style="color:var(--red)">*</span></label><input id="nu_email" type="email" placeholder="person@myhaulstore.com"></div>
       <div class="field"><label>Phone <span class="lead-sub">(optional)</span></label><input id="nu_phone" placeholder="+91 …"></div>
       <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Team Lead</option><option value="admin">Admin</option></select></div>
       <div class="field"><label>Team / Product</label><select id="nu_team">${teamOpt}</select></div>
       <div class="field"><label>Department</label><input id="nu_dept" placeholder="e.g. Pre Sales / TFD Sales"></div>
-      <div class="field"><label>Login PIN (4 digit) <span style="color:var(--red)">*</span></label><input id="nu_pin" maxlength="4" placeholder="e.g. 4321"></div>
+      <div class="field"><label>Password <span class="lead-sub">(leave blank for 123456)</span></label><input id="nu_pwd" placeholder="at least 6 characters"></div>
       <button class="btn block" data-action="saveuser">Add Member</button></div></div>`);
 }
 function editUserModal(uid){
@@ -1246,13 +1304,13 @@ function editUserModal(uid){
   openModal(`<div class="modal"><div class="modal-h"><h3>Edit User</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="field"><label>Name</label><input id="eu_name" value="${esc(u.name)}"></div>
-      <div class="field"><label>Email <span class="lead-sub">(add when the person is finalised)</span></label><input id="eu_email" value="${esc(u.email||'')}" placeholder="add later"></div>
       <div class="field"><label>Phone</label><input id="eu_phone" value="${esc(u.phone||'')}" placeholder="+91 …"></div>
       <div class="field"><label>Role</label><select id="eu_role">${roleOpt}</select></div>
       <div class="field"><label>Team / Product</label><select id="eu_team">${teamOpt}</select></div>
       <div class="field"><label>Reports to (Team Lead) <span class="lead-sub">assign this sales agent to a TL</span></label><select id="eu_mgr">${mgrOpt}</select></div>
       <div class="field"><label>Department</label><input id="eu_dept" value="${esc(u.department||'')}"></div>
-      <div class="field"><label>Reset PIN <span class="lead-sub">(leave blank to keep current)</span></label><input id="eu_pin" maxlength="4" placeholder="new 4-digit PIN"></div>
+      <div class="field"><label>Email (login id)${u.email?'':' <span style="color:var(--red)">— missing, this user cannot sign in</span>'}</label><input id="eu_email2" type="email" value="${esc(u.email||'')}" placeholder="person@myhaulstore.com"></div>
+      <div class="field"><label>Reset password <span class="lead-sub">(leave blank to keep current)</span></label><input id="eu_pwd" placeholder="at least 6 characters"></div>
       <button class="btn block" data-action="saveedituser" data-uid="${u.id}">Save changes</button></div></div>`);
 }
 function transferUserModal(uid){
@@ -1287,6 +1345,15 @@ function bulkStageModal(){ const ids=Object.keys(selLeads); if(!ids.length){aler
     <div class="modal-b"><div class="lead-sub" style="margin-bottom:10px">Set a new status for the ${ids.length} selected leads.</div>
       <div class="field"><label>New status</label><select id="bs_st">${opt}</select></div>
       <button class="btn block" data-action="dobulkstatus">Update ${ids.length} leads</button></div></div>`); }
+function passwordModal(){
+  openModal(`<div class="modal"><div class="modal-h"><h3>🔒 My Account — change password</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">Signed in as <b>${esc(state.user.email||state.user.name)}</b>. Your password is only known to you — an Admin can reset it but cannot read it.</div>
+      <div class="field"><label>Current password</label><input id="pw_cur" type="password" autocomplete="current-password"></div>
+      <div class="field"><label>New password <span class="lead-sub">(at least 6 characters)</span></label><input id="pw_new" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>Repeat new password</label><input id="pw_rep" type="password" autocomplete="new-password"></div>
+      <button class="btn block" data-action="savepassword">Change password</button></div></div>`);
+}
 function callLogModal(id){
   const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,'');
   openModal(`<div class="modal"><div class="modal-h"><h3>📞 Call ${esc(l?l.name:'')}</h3><span class="x" data-action="closemodal">×</span></div>
@@ -1311,25 +1378,33 @@ const gv=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
 function findLeadLocal(id){ if(state.currentLead&&state.currentLead.id===id)return state.currentLead; return (state.leads||[]).find(l=>l.id===id); }
 
 document.addEventListener('click',async function(e){
-  const key=e.target.closest('[data-key]');
-  if(key && !state.user){ const k=key.dataset.key;
-    if(k==='back') state.pin=state.pin.slice(0,-1); else if(k==='clear') state.pin=''; else if(state.pin.length<4) state.pin+=k;
-    state.loginErr=''; if(state.pin.length===4){ const pin=state.pin; render(); return doLogin(pin); } render(); return; }
-
   const nav=e.target.closest('[data-nav]');
   if(nav){ const r=nav.dataset.nav; if(r==='back'){ return go(state.user.role==='sales'?'myleads':'leads'); } return go(r); }
 
   const act=e.target.closest('[data-action]');
   if(act){ const a=act.dataset.action, id=act.dataset.lead;
+    if(a==='dologin'){ const em=gv('lg_email'); const pw=(document.getElementById('lg_pwd')||{}).value||'';
+      if(!em||!pw){ state.loginErr='Enter your email and password'; return render(); }
+      return doLogin(em,pw); }
     if(a==='logout'){ if(confirm('Log out?')) logout(); return; }
+    if(a==='myaccount'){ return passwordModal(); }
+    if(a==='savepassword'){
+      const cur=(document.getElementById('pw_cur')||{}).value||'';
+      const nw=(document.getElementById('pw_new')||{}).value||'';
+      const rp=(document.getElementById('pw_rep')||{}).value||'';
+      if(nw.length<6){ alert('New password must be at least 6 characters'); return; }
+      if(nw!==rp){ alert('The two new passwords do not match'); return; }
+      const r=await api('/api/me/password','POST',{current:cur,password:nw});
+      if(r.error){ alert(r.error); return; }
+      state.user.pwd_changed=true; closeModal(); state.toastMsg='🔒 Password changed'; return render(); }
     if(a==='addlead'){ return addLeadModal(); }
     if(a==='adduser'){ return addUserModal(); }
     if(a==='clearsample'){ if(confirm('Remove all pre-loaded demo/sample leads? Your real imported leads will NOT be touched. This cannot be undone.')){ const r=await api('/api/admin/clear-sample','POST',{}); state.toastMsg='🗑️ '+(r.removed||0)+' sample leads removed'; return refresh(); } return; }
     if(a==='edituser'){ return editUserModal(act.dataset.uid); }
     if(a==='transferuser'){ return transferUserModal(act.dataset.uid); }
     if(a==='saveedituser'){ const uid=act.dataset.uid; const name=gv('eu_name'); if(!name){alert('Enter a name');return;}
-      const body={name,email:gv('eu_email'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept'),manager_id:(document.getElementById('eu_mgr')||{}).value||''};
-      const pin=gv('eu_pin'); if(pin){ if(pin.length!==4){alert('PIN must be 4 digits');return;} body.pin=pin; }
+      const body={name,email:gv('eu_email2'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept'),manager_id:(document.getElementById('eu_mgr')||{}).value||''};
+      const pwd=gv('eu_pwd'); if(pwd){ if(pwd.length<6){alert('Password must be at least 6 characters');return;} body.password=pwd; }
       const r=await api('/api/users/'+uid,'PATCH',body); if(r.error){alert(r.error);return;}
       closeModal(); state.toastMsg='User updated ✓'; return refresh(); }
     if(a==='dotransfer'){ const uid=act.dataset.uid; const to=document.getElementById('tr_to').value; if(!to){alert('Choose an agent to transfer to');return;}
@@ -1351,7 +1426,9 @@ document.addEventListener('click',async function(e){
     if(a==='dl-agents'){ return exportAgentsReport(act.dataset.fmt); }
     if(a==='dl-calling'){ return exportCallingReport(act.dataset.fmt); }
     if(a==='dl-daily'){ return exportDaily(act.dataset.fmt); }
-    if(a==='dailyrange'){ state.dailyFrom=gv('dailyFrom'); state.dailyTo=gv('dailyTo'); state.dailyOwner=(document.getElementById('dailyOwner')||{}).value||''; return refresh(); }
+    if(a==='dailyrange'){ state.dailyFrom=gv('dailyFrom'); state.dailyTo=gv('dailyTo');
+      state.dailyOwner=(document.getElementById('dailyOwner')||{}).value||'';
+      state.dailyTeam=(document.getElementById('dailyTeam')||{}).value||''; return refresh(); }
     if(a==='walogout'){ if(confirm('WhatsApp disconnect karke naya QR laayein?')){ await api('/api/whatsapp/logout','POST'); state.wa={available:true,connected:false,qr:null}; state.toastMsg='WhatsApp disconnected — naya QR aa raha hai'; return refresh(); } return; }
     if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
     if(a==='dismissjunk'){ state.junkDismissed=true; return render(); }
@@ -1394,11 +1471,14 @@ document.addEventListener('click',async function(e){
     if(a==='savesource'){ const name=gv('ns_name'); if(!name){alert('Enter a name');return;}
       await api('/api/sources','POST',{name,icon:gv('ns_icon')||name.slice(0,2),color:document.getElementById('ns_color').value});
       const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source added: '+name; return refresh(); }
+    if(a==='savewaprod'){ const wp=(document.getElementById('st_waprod')||{}).value||'';
+      const r=await api('/api/settings','PATCH',{whatsapp_product:wp}); if(r.error){alert(r.error);return;}
+      const me=await api('/api/me'); setCfg(me.config); state.toastMsg='🟢 WhatsApp leads → '+wp; return refresh(); }
     if(a==='savesettings'){ await api('/api/settings','PATCH',{target_leads:+gv('st_leads'),target_interested:+gv('st_int'),target_closed:+gv('st_closed')});
       const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets saved ✓'; return refresh(); }
     if(a==='applydash'){ const val=id=>{const e=document.getElementById(id);return e?e.value:'';};
-      state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer')}; return refresh(); }
-    if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:''}; return refresh(); }
+      state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer'),team:val('dteam')}; return refresh(); }
+    if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:'',team:''}; return refresh(); }
     if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Opening email…'; return refresh(); }
     if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}; return refresh(); }
           if(a==='togtodayfresh'){ state.filters.todayfresh=state.filters.todayfresh?'':'1'; return refresh(); }
@@ -1417,9 +1497,11 @@ document.addEventListener('click',async function(e){
     }
     if(a==='saveuser'){
       const name=gv('nu_name'); if(!name){alert('Enter a name');return;}
-      const pin=gv('nu_pin')||'0000';
-      await api('/api/users','POST',{name,email:gv('nu_email'),phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),pin});
-      closeModal(); state.toastMsg=name+' added. PIN: '+pin; if(state.route==='users') return refresh(); return; }
+      const email=gv('nu_email'); if(!email.includes('@')){alert('Enter a valid email — it is the login id');return;}
+      const pwd=gv('nu_pwd'); if(pwd&&pwd.length<6){alert('Password must be at least 6 characters');return;}
+      const r=await api('/api/users','POST',{name,email,phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),password:pwd||undefined});
+      if(r.error){alert(r.error);return;}
+      closeModal(); state.toastMsg=name+' added — login: '+email+' / '+(pwd||'123456'); if(state.route==='users') return refresh(); return; }
     if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
     if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
     if(a==='callnow'){ return callLogModal(id); }
@@ -1483,6 +1565,9 @@ document.addEventListener('input',function(e){
 
 document.addEventListener('keydown',function(e){
   if(e.key==='Enter' && (e.target.id==='globalSearch'||e.target.id==='searchBox')){ state.searchQ=e.target.value.trim(); go('search'); }
+  if(e.key==='Enter' && (e.target.id==='lg_email'||e.target.id==='lg_pwd')){
+    const em=gv('lg_email'); const pw=(document.getElementById('lg_pwd')||{}).value||'';
+    if(em&&pw) doLogin(em,pw); }
 });
 
 /* real-time auto-refresh — keep the dashboard & follow-ups live every 15s,
