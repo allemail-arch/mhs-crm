@@ -196,17 +196,43 @@ const STATUS_LIST=Object.keys(STATUS);
 const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, loginEmail:'', loginErr:'',
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:'',team:''},
-  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25 };
+  searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25,
+  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0,
+  teamFilter:{q:'',role:'',team:'',manager:'',dept:'',status:''},
+  closedFilter:{from:'',to:'',type:''}, assignFilter:{from:'',to:'',owner:'',by:'',reason:'',q:''}, closedSel:{} };
 
 const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
 const teamCode=k=>CFG().teams[k]?.code||k;
 const salesUsers=()=>state.users.filter(u=>u.role==='sales');
+/* admin > super (Super Manager) > lead (Manager) > sales */
+const ROLE_LABEL={admin:'Admin',super:'Super Manager',lead:'Manager',sales:'Sales'};
+const roleLabel=r=>((CFG().roleLabels||ROLE_LABEL)[r])||r;
+const isManagerRole=r=>r==='admin'||r==='super'||r==='lead';
+/* Add Lead is a manager job — Sales work the leads they are given.
+   The server enforces the same list, this only hides the button. */
+function canAddLead(){ const r=state.user&&state.user.role; return ((CFG().addLeadRoles)||['admin','super','lead']).includes(r); }
 /* agents the current user may assign leads to: admin=all; TL=their managed agents (fallback team) */
 function assignableAgents(){
   const u=state.user; if(!u) return salesUsers();
+  // the API already scopes state.users to this manager's own people
   if(u.role==='lead'){ const mine=salesUsers().filter(x=>x.manager_id===u.id); return mine.length?mine:salesUsers().filter(x=>x.team===u.team); }
   return salesUsers();
+}
+/* Item 3 — picking a product narrows the owner list to that product's agents,
+   so a lead can never be handed to someone who does not sell it. */
+function agentsForProduct(product){
+  const all=assignableAgents();
+  if(!product) return all;
+  const hit=all.filter(u=>u.team===product);
+  return hit.length?hit:[];
+}
+function ownerOptionsHTML(product,selected,withAuto){
+  const list=agentsForProduct(product);
+  let html=withAuto?'<option value="auto">⚡ Auto — Round Robin (recommended)</option>':'';
+  html+=list.map(u=>`<option value="${u.id}" ${selected===u.id?'selected':''}>${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
+  if(!list.length) html+=`<option value="" disabled>— no agent in ${esc(teamCode(product))} yet —</option>`;
+  return html;
 }
 const userById=id=>state.users.find(u=>u.id===id);
 /* only Admin + Team Lead may bulk-upload leads (server enforces this too) */
@@ -214,19 +240,51 @@ function canImport(){ const r=state.user&&state.user.role; const roles=(CFG().im
 const initials=n=>String(n||'').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
 /* escape ALL user-provided text before putting it in innerHTML (prevents XSS) */
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function parseD(s){ if(!s)return null; return new Date(String(s).length<=10?s+'T00:00:00':String(s).replace(' ','T')); }
-function fmtDate(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'}):'—'; }
-function fmtTime(s){ const d=parseD(s); return d?d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):''; }
-function fmtDateTime(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):''; }
-function isOverdue(s){ if(!s)return false; const t=new Date();t.setHours(0,0,0,0); const x=parseD(s);x.setHours(0,0,0,0); return x<t; }
-function isToday(s){ if(!s)return false; const t=new Date(),x=parseD(s); return x.getDate()===t.getDate()&&x.getMonth()===t.getMonth()&&x.getFullYear()===t.getFullYear(); }
+/* ============================================================
+   IST CLOCK — one clock for the whole CRM
+   Every timestamp the API returns is IST wall-clock text
+   ('YYYY-MM-DD HH:MM:SS'). Feeding that to new Date() made the
+   browser read it in the DEVICE timezone, so an agent whose laptop
+   sat on the wrong zone saw shifted dates, a "today" that started
+   at the wrong hour, and reminders an hour or two off.
+   Everything below is anchored to IST no matter what the device
+   clock says — parse, format and compare all go through here.
+   ============================================================ */
+const IST_OFF=330*60000;                       // +05:30 in ms
+const IST_TZ={timeZone:'Asia/Kolkata'};
+function parseD(s){ if(!s)return null;
+  const m=String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if(!m){ const d=new Date(s); return isNaN(d.getTime())?null:d; }
+  return new Date(Date.UTC(+m[1],+m[2]-1,+m[3],+(m[4]||0),+(m[5]||0),+(m[6]||0))-IST_OFF); }
+function istParts(d){ const t=new Date((d||new Date()).getTime()+IST_OFF);
+  return {y:t.getUTCFullYear(),m:t.getUTCMonth()+1,d:t.getUTCDate(),H:t.getUTCHours(),M:t.getUTCMinutes()}; }
+const pad2=n=>String(n).padStart(2,'0');
+function istDateStr(d){ const p=istParts(d); return p.y+'-'+pad2(p.m)+'-'+pad2(p.d); }
+function istDateTimeStr(d){ const p=istParts(d); return p.y+'-'+pad2(p.m)+'-'+pad2(p.d)+' '+pad2(p.H)+':'+pad2(p.M); }
+/* 'now + n minutes', in the 'YYYY-MM-DD HH:MM' shape the API expects */
+function istPlusMinutes(n){ return istDateTimeStr(new Date(Date.now()+(+n||0)*60000)); }
+function fmtDate(s){ const d=parseD(s); return d?d.toLocaleDateString('en-IN',{...IST_TZ,day:'2-digit',month:'short'}):'—'; }
+function fmtTime(s){ const d=parseD(s); return d?d.toLocaleTimeString('en-IN',{...IST_TZ,hour:'2-digit',minute:'2-digit'}):''; }
+function fmtDateTime(s){ const d=parseD(s); return d?fmtDate(s)+', '+fmtTime(s):''; }
+/* a reminder is stored as 'YYYY-MM-DD HH:MM'; older ones are date-only */
+const remAt=s=>!s?'':(String(s).length<=10?String(s)+' 10:00':String(s).slice(0,16));
+function fmtRemind(s){ const v=remAt(s); return v?fmtDate(v)+' • '+fmtTime(v):'—'; }
+function isOverdue(s){ if(!s)return false; return String(s).slice(0,10)<istDateStr(new Date()); }
+function isToday(s){ if(!s)return false; return String(s).slice(0,10)===istDateStr(new Date()); }
+/* overdue to the MINUTE — a 3pm reminder is not late at 2pm the same day */
+function isDue(s){ const v=remAt(s); return !!v && v<istDateTimeStr(new Date()); }
+/* '2h 10m late' / 'in 35m' / 'in 2 days' — human wording for a reminder */
+function untilText(s){ const v=remAt(s); if(!v) return '';
+  const diff=Math.round((parseD(v).getTime()-Date.now())/60000);
+  const a=Math.abs(diff), late=diff<0;
+  let t; if(a<1) t='now'; else if(a<60) t=a+'m'; else if(a<1440) t=Math.floor(a/60)+'h '+(a%60?(a%60)+'m':''); else t=Math.floor(a/1440)+'d';
+  return a<1?'due now':(late?t.trim()+' late':'in '+t.trim()); }
 function scoreTier(v){ if(v>=75)return{t:'Hot',c:'#e5484d'}; if(v>=55)return{t:'Warm',c:'#f5a623'}; return{t:'Cold',c:'#6b7488'}; }
 function fmtDur(s){ s=+s||0; if(!s)return '—'; const m=Math.floor(s/60),ss=s%60; return m?m+'m '+ss+'s':ss+'s'; }
-function todayStr(){ const d=new Date(); const p=n=>String(n).padStart(2,'0');
-  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+function todayStr(){ return istDateStr(new Date()); }
 /* Timestamps from the API are IST wall-clock (see server db.js) — parse them
    as-is. Appending 'Z' used to treat them as UTC and add another 5h30m. */
-function loginTime(s){ if(!s)return '—'; const d=parseD(s); return d?d.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):s; }
+function loginTime(s){ if(!s)return '—'; const d=parseD(s); return d?d.toLocaleString('en-IN',{...IST_TZ,day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):s; }
 function downloadCSV(filename, rows){ const csv=rows.map(r=>r.map(c=>{c=String(c==null?'':c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c;}).join(',')).join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
 /* Excel (.xlsx) — one or more sheets. sheets=[{name, rows:[[...]]}] */
@@ -287,6 +345,52 @@ function buildReportExport(kind){
       sheets:[{name:'By Department',rows:[dHead,...dBody]},{name:'All users',rows:[head,...body]}]}; }
   return null;
 }
+/* Item 4 — export the closed-lead list. If rows are marked, only those go out. */
+function exportClosed(fmt){
+  const cl=state.reports.closed; if(!cl||!cl.leads.length){ state.toastMsg='No closed leads to download'; return render(); }
+  const marked=Object.keys(state.closedSel||{});
+  const leads=marked.length?cl.leads.filter(l=>state.closedSel[l.id]):cl.leads;
+  const head=['Client','Phone','Email','City','Result','Product','Source','Closed by','Team','Calls','Talk time','Created on','Closed on'];
+  const body=leads.map(l=>[l.name,l.phone||'',l.email||'',l.city||'',l.status,teamName(l.product),l.source||'',
+    l.owner_name||'',l.owner_team||'',l.calls,l.talktime?fmtDur(l.talktime):'0s',
+    fmtDateTime(l.created_at),fmtDateTime(l.closed_at)]);
+  const aHead=['Agent','Team','Won','Lost','Total'];
+  const aBody=(cl.perAgent||[]).map(a=>[a.name,a.team||'',a.won,a.lost,a.total]);
+  const name='closed-leads-'+todayStr();
+  const title='Closed Leads — '+cl.won+' won / '+cl.lost+' lost'+(marked.length?' ('+marked.length+' marked)':'');
+  if(fmt==='pdf') downloadPDF(name+'.pdf',title,[{caption:'By agent',head:aHead,body:aBody},{caption:'Closed clients',head,body}],
+    [{name:'By agent',rows:[aHead,...aBody]},{name:'Closed clients',rows:[head,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'By agent',rows:[aHead,...aBody]},{name:'Closed clients',rows:[head,...body]}]);
+}
+/* Item 10 — the whole assignment history as a sheet */
+function exportAssignments(fmt){
+  const ah=state.reports.assignments; if(!ah||!ah.rows.length){ state.toastMsg='No assignment history to download'; return render(); }
+  const head=['When','Lead','Phone','Product','From','To','Assigned by','How'];
+  const body=ah.rows.map(r=>[fmtDateTime(r.created_at),r.lead_name||'',r.phone||'',r.product||'',
+    r.from_name||'Unassigned',r.to_name||'Unassigned',r.by_name||'System',r.reason||'manual']);
+  const bHead=['Assigned by','Leads assigned']; const bBody=(ah.byUser||[]).map(u=>[u.name,u.assigned]);
+  const tHead=['Assigned to','Leads received']; const tBody=(ah.toUser||[]).map(u=>[u.name,u.received]);
+  const name='lead-assignment-history-'+todayStr();
+  if(fmt==='pdf') downloadPDF(name+'.pdf','Lead Assignment History ('+ah.total+')',
+    [{caption:'Assigned by',head:bHead,body:bBody},{caption:'Assigned to',head:tHead,body:tBody},{caption:'Full history',head,body}],
+    [{name:'Full history',rows:[head,...body]}]);
+  else downloadXLSX(name+'.xlsx',[{name:'Full history',rows:[head,...body]},{name:'Assigned by',rows:[bHead,...bBody]},{name:'Assigned to',rows:[tHead,...tBody]}]);
+}
+/* Item 6 — the org chart as a sheet */
+function exportTeam(){
+  const ts=state.teamStructure; if(!ts||!ts.all.length){ state.toastMsg='No team data to download'; return render(); }
+  const byId=Object.fromEntries(ts.all.map(u=>[u.id,u]));
+  const head=['Name','Role','Product','Department','Email','Phone','Reports to','Leads','Active'];
+  const body=ts.all.map(u=>[u.name,roleLabel(u.role),u.team==='-'?'':teamName(u.team),u.department||'',u.email||'',u.phone||'',
+    (byId[u.manager_id]||{}).name||'',u.role==='sales'?u.leads:'',u.active?'Yes':'No']);
+  const mHead=['Manager','Product','Reports to','Team size','Team leads'];
+  const mBody=(ts.managers||[]).map(m=>[m.name,m.team==='-'?'':teamName(m.team),m.superName||'',m.teamSize,m.teamLeads]);
+  const sHead=['Super Manager','Managers','Agents','Leads'];
+  const sBody=(ts.supers||[]).map(x=>[x.name,x.managerCount,x.teamSize,x.teamLeads]);
+  const sheets=[{name:'All users',rows:[head,...body]},{name:'Manager wise',rows:[mHead,...mBody]}];
+  if(sBody.length) sheets.push({name:'Super Manager wise',rows:[sHead,...sBody]});
+  downloadXLSX('team-structure-'+todayStr()+'.xlsx',sheets);
+}
 function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
   if(fmt==='pdf') downloadPDF(r.name+'.pdf', r.title, r.tables, r.sheets);
   else downloadXLSX(r.name+'.xlsx', r.sheets); }
@@ -345,8 +449,10 @@ async function loadRouteData(){
     ['from','to','source','department','owner','team'].forEach(k=>{ if(f[k]) qs.set(k,f[k]); });
     const q=qs.toString()?'?'+qs.toString():'';
     state.reports.summary=await api('/api/reports/summary'+q);
+    try{ state.reminders=await api('/api/reminders?limit=200'); }catch(_){ state.reminders=null; }
     if(role==='sales'){ state.leads=(await api('/api/leads')).leads; }
-    else { state.reports.agents=(await api('/api/reports/agents'+q)).agents; state.reports.activity=(await api('/api/reports/activity'+q)).activity; }
+    else { state.reports.agents=(await api('/api/reports/agents'+q)).agents; state.reports.activity=(await api('/api/reports/activity'+q)).activity;
+      try{ state.teamStructure=await api('/api/team/structure'); }catch(_){} }
   } else if(r==='leads'||r==='myleads'){
     const q=new URLSearchParams(); const f=state.filters;
     if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner); if(f.todayfresh)q.set('todayfresh','1');
@@ -355,6 +461,7 @@ async function loadRouteData(){
     state.leads=(await api('/api/leads?'+q.toString())).leads;
   } else if(r==='followups'){
     state.leads=(await api('/api/leads')).leads;
+    try{ state.reminders=await api('/api/reminders?limit=200'); }catch(_){}
     if(role!=='sales') state.reports.followups=await api('/api/reports/followups');
   } else if(r==='settings'){
     state.settings=(await api('/api/settings')).settings;
@@ -370,6 +477,12 @@ async function loadRouteData(){
     state.reports.followups=await api('/api/reports/followups'+(tq?'?'+tq:''));
     state.reports.deletions=await api('/api/reports/deletions');
     state.reports.usersList=await api('/api/reports/users');
+    const cq=new URLSearchParams(); const cf=state.closedFilter||{};
+    if(cf.from)cq.set('from',cf.from); if(cf.to)cq.set('to',cf.to); if(cf.type)cq.set('closedType',cf.type);
+    state.reports.closed=await api('/api/reports/closed'+(cq.toString()?'?'+cq.toString():''));
+    const aq=new URLSearchParams(); const af=state.assignFilter||{};
+    ['from','to','owner','by','reason','q'].forEach(k=>{ if(af[k]) aq.set(k,af[k]); });
+    state.reports.assignments=await api('/api/reports/assignments'+(aq.toString()?'?'+aq.toString():''));
   } else if(r==='calls'){
     state.calls=(await api('/api/calls')).calls||[];
   } else if(r==='whatsapp'){
@@ -378,6 +491,7 @@ async function loadRouteData(){
     state.searchResults=state.searchQ?((await api('/api/leads/search?q='+encodeURIComponent(state.searchQ))).leads||[]):[];
   } else if(r==='users'){
     state.users=(await api('/api/users')).users;
+    state.teamStructure=await api('/api/team/structure');
   } else if(r==='connectors'){
     state.connectors=(await api('/api/connectors')).connectors;
     state.automation=(await api('/api/automation')).automation;
@@ -397,6 +511,8 @@ async function doLogin(email,password){
   if(r.error){ state.loginErr=r.error; render(); return; }
   state.token=r.token; state.user=r.user;
   const me=await api('/api/me'); setCfg(me.config);
+  /* Item 11 — compare this device's clock with the server's IST clock */
+  try{ const sv=parseD(me.config.serverNow); if(sv) state.clockSkew=Math.round((Date.now()-sv.getTime())/60000); }catch(_){ state.clockSkew=0; }
   try{ state.users=(await api('/api/users')).users; }catch(_){ state.users=[]; }
   state.route='dashboard'; state.loginErr='';
   await loadRouteData(); render();
@@ -439,16 +555,24 @@ function renderLogin(){
 function navItems(){
   const r=state.user.role;
   if(r==='admin') return [['dashboard','Dashboard','📊'],['leads','All Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['connectors','Sources','🔌'],['whatsapp','WhatsApp','🟢'],['settings','Settings','⚙️'],['reports','Reports','📄']];
-  if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
+  if(r==='super') return [['dashboard','Overview','📊'],['leads','Leads','📋'],['followups','Follow-ups','⏰'],['users','Team','👥'],['calls','Calls','📞'],['reports','Reports','📄']];
+  if(r==='lead')  return [['dashboard','Team Report','📊'],['leads','Team Leads','📋'],['followups','Follow-ups','⏰'],['users','My Team','👥'],['calls','Call History','📞'],['reports','Reports','📄']];
   return [['dashboard','Today','🏠'],['myleads','My Leads','📋'],['followups','Follow-ups','⏰'],['calls','Call History','📞']];
 }
 function renderShell(inner){
   const u=state.user;
-  const roleLabel=u.role==='admin'?'Admin':u.role==='lead'?'Team Lead • '+teamCode(u.team):'Sales • '+teamCode(u.team);
+  const roleTxt=(u.role==='admin')?'Admin':roleLabel(u.role)+(u.team&&u.team!=='-'?' • '+teamCode(u.team):'');
   const nav=navItems();
   const top=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}">${n[1]}</a>`).join('');
   const bot=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}"><span class="bi">${n[2]}</span>${n[1]}</a>`).join('');
-  const addBtn=(u.role!=='lead')?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
+  // Item 9 — only Admin / Super Manager / Manager ever see Add Lead
+  const addBtn=canAddLead()?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
+  /* Item 11 — if the device clock itself is wrong (not just its timezone),
+     every "in 1 hour" reminder the POC sets would land at the wrong moment.
+     Dates are all rendered in IST, so only a genuinely wrong clock matters. */
+  const skewMin=state.clockSkew||0;
+  const clockWarn=(Math.abs(skewMin)>5)?`<div class="filters" style="background:#fff4e5;border:1px solid #ffd8a8;border-radius:10px;padding:10px 12px;margin-bottom:12px;align-items:center">
+      <span>🕒 This device's clock is <b>${Math.abs(skewMin)} min ${skewMin>0?'ahead of':'behind'}</b> the CRM server. Dates on screen are correct (IST), but please fix the device time so new reminders land at the right moment.</span></div>`:'';
   /* still on the shared default password → keep it visible until they change it */
   const pwdNudge=(u.pwd_changed===false)?`<div class="filters" style="background:#fff4e5;border:1px solid #ffd8a8;border-radius:10px;padding:10px 12px;margin-bottom:12px;align-items:center">
       <span>🔒 You are still using the default password <b>123456</b>. Anyone who knows your email can sign in as you.</span>
@@ -460,10 +584,10 @@ function renderShell(inner){
       ${addBtn}
       <button class="btn ghost sm" data-action="refreshnow" title="Refresh now">🔄</button>
       <div class="userchip" data-action="myaccount" title="My Account — change password"><div class="avatar">${initials(u.name)}</div>
-        <div><div class="nm">${esc(u.name)}</div><div class="rl">${roleLabel}</div></div></div>
+        <div><div class="nm">${esc(u.name)}</div><div class="rl">${roleTxt}</div></div></div>
       <button class="btn ghost sm" data-action="logout">Logout</button>
     </div>
-    <div class="content">${pwdNudge}${inner}</div>
+    <div class="content">${pwdNudge}${clockWarn}${inner}</div>
     <div class="botnav">${bot}</div></div>`;
 }
 function pageContent(){
@@ -499,13 +623,43 @@ function targetCard(title,leadsN,intN,closeN,tgt,drillProduct){
   return `<div class="panel" ${drillProduct?`data-drill data-fproduct="${drillProduct}" style="cursor:pointer"`:''}><div class="panel-h">${title}<span style="font-size:11px;color:var(--muted);font-weight:600">Target</span></div>
     <div class="panel-b">${bar('Leads',leadsN,tgt.leads,'#2d5be3')}${bar('Interested',intN,tgt.interested,'#f5a623')}${bar('Closed Won',closeN,tgt.closed,'#12a150')}</div></div>`;
 }
-function todayCallCard(l){const over=isOverdue(l.next_followup);
+function todayCallCard(l){const over=isDue(l.next_followup_at||l.next_followup);
+  const at=l.next_followup_at||l.next_followup;
   return `<div class="lcard" data-lead="${l.id}">
     <div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)} • ${esc(l.product)}</div></div>${badge(l.status)}</div>
-    <div class="row"><span class="meta ${over?'overdue':''}">⏰ ${fmtDate(l.next_followup)}${over?' (overdue)':' (today)'}</span>${srcChip(l.source)}</div>
+    <div class="row"><span class="meta ${over?'overdue':''}">⏰ ${fmtRemind(at)} <b>${untilText(at)}</b></span>${srcChip(l.source)}</div>
     <div class="acts"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>
-      <button class="btn ghost" data-action="wa" data-lead="${l.id}">WhatsApp</button>
+      <button class="btn ghost" data-action="editreminder" data-lead="${l.id}">⏰ Reschedule</button>
       <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
+}
+/* ---------------- MY REMINDERS (item 5) ----------------
+   Everything the POC promised, in the order it comes due. Overdue at the
+   top in red, then today, then what is coming. Times are IST wall-clock.  */
+function remindersPanel(compact){
+  const rr=state.reminders||{reminders:[],counts:{overdue:0,today:0,upcoming:0}};
+  const list=rr.reminders||[]; const c=rr.counts||{};
+  const showOwner=state.user.role!=='sales';
+  const groups=[
+    ['overdue','🔴 Overdue — call these first','var(--red)'],
+    ['today','📅 Due today',  'var(--orange)'],
+    ['upcoming','🗓️ Coming up','var(--muted)']];
+  const rowsFor=(b)=>list.filter(x=>x.bucket===b).slice(0,compact?5:60).map(x=>`
+    <tr data-lead="${x.id}" style="cursor:pointer">
+      <td style="white-space:nowrap"><b>${fmtRemind(x.at)}</b><div class="lead-sub" style="${b==='overdue'?'color:var(--red)':''}">${untilText(x.at)}</div></td>
+      <td><div class="lead-nm">${esc(x.name)}</div><div class="lead-sub">${esc(x.phone||'')}${x.product?' • '+teamCode(x.product):''}</div></td>
+      <td>${badge(x.status)}</td>
+      ${showOwner?`<td class="lead-sub">${esc(x.owner_name||'—')}</td>`:''}
+      <td><button class="btn sm" data-action="call" data-lead="${x.id}">📞 Call</button></td></tr>`).join('');
+  const sections=groups.map(g=>{ const r=rowsFor(g[0]); if(!r) return '';
+    return `<tr><td colspan="${showOwner?5:4}" style="background:var(--bg);font-weight:800;color:${g[2]};padding:8px 12px">${g[1]} (${(c[g[0]]||0)})</td></tr>${r}`;
+  }).join('');
+  const empty=`<tr><td colspan="${showOwner?5:4}" style="text-align:center;color:var(--muted);padding:26px">🎉 No reminders pending. Set one on every call so nothing slips.</td></tr>`;
+  return `<div class="panel" style="margin-bottom:16px;border:2px solid ${c.overdue?'#ffd0cf':'#e3e7ee'}">
+    <div class="panel-h">⏰ My Reminders — who to call and when
+      <span class="lead-sub" style="font-weight:400">${c.overdue||0} overdue • ${c.today||0} today • ${c.upcoming||0} upcoming</span></div>
+    <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+      <thead><tr><th>When</th><th>Client</th><th>Status</th>${showOwner?'<th>Owner</th>':''}<th></th></tr></thead>
+      <tbody>${sections||empty}</tbody></table></div></div></div>`;
 }
 function funnelHTML(funnel){
   const maxF=Math.max(1,...funnel.map(f=>f.n));
@@ -533,6 +687,7 @@ function renderDashboard(){
     const freshN=state.leads.filter(l=>l.status==='Fresh').length;
     const dueTodayN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isToday(l.next_followup)).length;
     const missedN=state.leads.filter(l=>STATUS[l.status]?.open && l.next_followup && isOverdue(l.next_followup)).length;
+    void missedN;
     const openN=state.leads.filter(l=>STATUS[l.status]?.open).length;
     const smS=state.reports.summary||{};
     const talkStr=smS.myTodayTalk?fmtDur(smS.myTodayTalk):'0s';
@@ -544,9 +699,10 @@ function renderDashboard(){
       <div class="kpi" data-nav="calls" style="cursor:pointer;border-left:4px solid #7c5cff"><div class="lbl">📞 Today's Talk Time</div><div class="val" style="color:#7c5cff">${talkStr}</div><div class="sub">${smS.myTodayCalls||0} calls today • call history →</div></div></div>`;
     const list=todayLs.length?`<div class="cards" style="display:flex">${todayLs.map(todayCallCard).join('')}</div>`
       :`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:26px">🎉 All calls done for today!</div></div>`;
-    return `<div class="page-h"><h2>Hello, ${first} 👋</h2></div>
+    return `<div class="page-h"><h2>Hello, ${first} 👋</h2><span class="cnt">${fmtDateTime(istDateTimeStr(new Date()))} IST</span></div>
       ${summary}
-      <div class="panel" style="margin-bottom:16px;border:2px solid #ffe0c2">
+      ${remindersPanel(false)}
+      <div class="panel mobile-only" style="margin-bottom:16px;border:2px solid #ffe0c2">
         <div class="panel-h" style="color:var(--orange)">📞 Calls to make today — ${todayLs.length} leads<span class="badge b-rnr">Priority</span></div>
         <div class="panel-b">${list}</div></div>
       ${kpis}
@@ -554,7 +710,8 @@ function renderDashboard(){
         <div class="panel"><div class="panel-h">My Funnel</div><div class="panel-b funnel">${funnelHTML(sm.funnel)}</div></div></div>`;
   }
 
-  // admin / lead
+  // admin / super manager / manager
+  const remPanel=remindersPanel(true);
   const activity=state.reports.activity||[];
   const offenders=activity.filter(a=>a.junk>=3).sort((a,b)=>b.junk-a.junk);
   let junkAlert='';
@@ -601,7 +758,9 @@ function renderDashboard(){
     <div style="overflow-x:auto"><table><thead><tr><th>Team</th><th>Owner</th><th style="text-align:right">Total</th>
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
-  const title=state.user.role==='lead'?'Team Report — '+teamName(state.user.team):'Admin Dashboard';
+  const title=state.user.role==='lead'?'My Team — '+esc(state.user.name)
+            :state.user.role==='super'?'My Managers — '+esc(state.user.name)
+            :'Admin Dashboard';
   const f=state.dashFilter;
   const srcOpt=srcList().map(s=>`<option value="${s}" ${f.source===s?'selected':''}>${s}</option>`).join('');
   const depOpt=(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.department===d?'selected':''}>${esc(d)}</option>`).join('');
@@ -616,7 +775,11 @@ function renderDashboard(){
     <select id="ddept"><option value="">All Departments</option>${depOpt}</select>
     <select id="downer"><option value="">All Employees</option>${empOpt}</select>
     <button class="btn sm" data-action="applydash">Apply Filter</button>${active?' <button class="btn ghost sm" data-action="cleardash">Clear</button>':''}</div>`;
-  return `<div class="page-h"><h2>${title}</h2></div>${dateBar}${junkAlert}${kpis}
+  /* Item 7 — a Manager's dashboard is their own data only. Say so plainly so
+     nobody mistakes a smaller number for missing data.                      */
+  const scopeNote=(state.user.role==='lead')?`<div class="lead-sub" style="margin-bottom:10px">Showing only your team's data — ${salesUsers().length} agent(s) reporting to you.</div>`
+    :(state.user.role==='super')?`<div class="lead-sub" style="margin-bottom:10px">Showing every Manager under you and their teams — ${((state.teamStructure||{}).managers||[]).length} manager(s), ${salesUsers().length} agent(s).</div>`:'';
+  return `<div class="page-h"><h2>${title}</h2><span class="cnt">${fmtDateTime(istDateTimeStr(new Date()))} IST</span></div>${scopeNote}${dateBar}${junkAlert}${kpis}${remPanel}
     <div class="page-h" style="margin-top:6px"><h2 style="font-size:15px">🎯 Targets</h2></div>
     <div class="kpis">${teamCards}</div>${activityPanel}
     <div class="grid2" style="margin-top:16px">
@@ -730,20 +893,142 @@ function renderFollowups(){
 /* ---------------- USERS ---------------- */
 function renderUsers(){
   const isAdmin=state.user.role==='admin';
-  const roleB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
-  const actionBtns=u=>isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${u.id}">Edit</button> <button class="btn ghost sm" data-action="transferuser" data-uid="${u.id}">Transfer leads</button> <button class="btn ghost sm" style="color:var(--red);border-color:#ffd0cf" data-action="deleteuser" data-uid="${u.id}">Delete</button>`:'';
-  const rows=state.users.map(u=>`<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="avatar">${initials(u.name)}</div>
-    <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${u.email?esc(u.email):'<span style="color:var(--red)">no email — cannot sign in</span>'}${u.email&&u.pwd_changed===false?' <span class="pill" style="background:#fff4e5;color:#c77700">default password</span>':''}</div></div></div></td>
+  const ts=state.teamStructure||{supers:[],managers:[],unassigned:[],all:[]};
+  const f=state.teamFilter||{q:'',role:'',team:'',manager:'',dept:'',status:''};
+  const roleB=r=>{const cls=r==='admin'?'b-won':r==='super'?'b-interested':r==='lead'?'b-follow':'b-fresh';
+    return `<span class="badge ${cls}">${esc(roleLabel(r))}</span>`;};
+  const mgrName=id=>{const m=(ts.all||[]).find(x=>x.id===id); return m?m.name:'';};
+
+  /* ---------- item 8: filters ---------- */
+  const q=(f.q||'').toLowerCase();
+  const match=u=>{
+    if(q && !((u.name||'').toLowerCase().includes(q) || (u.email||'').toLowerCase().includes(q) || (u.phone||'').includes(q))) return false;
+    if(f.role && u.role!==f.role) return false;
+    if(f.team && u.team!==f.team) return false;
+    if(f.manager==='__none__'){ if(u.manager_id) return false; }
+    else if(f.manager && u.manager_id!==f.manager) return false;
+    if(f.dept && (u.department||'')!==f.dept) return false;
+    if(f.status==='active' && !u.active) return false;
+    if(f.status==='inactive' && u.active) return false;
+    return true;
+  };
+  const people=(ts.all||[]).filter(match);
+  const anyFilter=q||f.role||f.team||f.manager||f.dept||f.status;
+  const mgrsForFilter=(ts.managers||[]);
+  const filterBar=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px">
+    <input class="search" id="tf_q" placeholder="🔍 Name / email / phone…" value="${esc(f.q||'')}" style="min-width:190px">
+    <select id="tf_role"><option value="">All roles</option>${['admin','super','lead','sales'].map(r=>`<option value="${r}" ${f.role===r?'selected':''}>${esc(roleLabel(r))}</option>`).join('')}</select>
+    <select id="tf_team"><option value="">All products</option>${Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${f.team===k?'selected':''}>${teamName(k)}</option>`).join('')}</select>
+    <select id="tf_manager"><option value="">All managers</option>${mgrsForFilter.map(m=>`<option value="${m.id}" ${f.manager===m.id?'selected':''}>${esc(m.name)}</option>`).join('')}<option value="__none__" ${f.manager==='__none__'?'selected':''}>— no manager —</option></select>
+    <select id="tf_dept"><option value="">All departments</option>${(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.dept===d?'selected':''}>${esc(d)}</option>`).join('')}</select>
+    <select id="tf_status"><option value="">Active + inactive</option><option value="active" ${f.status==='active'?'selected':''}>Active only</option><option value="inactive" ${f.status==='inactive'?'selected':''}>Inactive only</option></select>
+    ${anyFilter?'<button class="btn ghost sm" data-action="clearteamfilter">✕ Clear filters</button>':''}
+    <div class="spacer"></div>
+    <button class="btn ghost sm" data-action="dl-team">⬇ Excel</button>
+    <button class="btn ghost sm ${state.teamView==='flat'?'':'ghost'}" data-action="teamview" data-view="${state.teamView==='flat'?'tree':'flat'}">${state.teamView==='flat'?'🌳 Manager-wise view':'📋 Flat list'}</button>
+  </div>`;
+
+  const actionBtns=u=>isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${u.id}">Edit</button>
+    <button class="btn ghost sm" data-action="transferuser" data-uid="${u.id}">Transfer leads</button>
+    <button class="btn ghost sm" style="color:var(--red);border-color:#ffd0cf" data-action="deleteuser" data-uid="${u.id}">Delete</button>`:'';
+
+  /* ---------- item 6/7: manager-wise view ---------- */
+  const memberRow=(u,indent)=>`<tr>
+    <td style="padding-left:${indent||0}px"><div style="display:flex;align-items:center;gap:10px"><div class="avatar">${initials(u.name)}</div>
+      <div><div class="lead-nm">${esc(u.name)}</div><div class="lead-sub">${u.email?esc(u.email):'<span style="color:var(--red)">no email — cannot sign in</span>'}</div></div></div></td>
     <td>${roleB(u.role)}</td><td>${u.team==='-'?'—':`<span class="pill">${teamName(u.team)}</span>`}</td>
-    <td class="num">${u.role==='sales'?u.leads:'—'}</td>${isAdmin?`<td>${actionBtns(u)}</td>`:''}</tr>`).join('');
-  const cards=state.users.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
+    <td class="lead-sub">${esc(u.department||'—')}</td>
+    <td class="lead-sub">${esc(mgrName(u.manager_id)||'—')}</td>
+    <td class="num">${u.role==='sales'?u.leads:'—'}</td>
+    ${isAdmin?`<td>${actionBtns(u)}</td>`:''}</tr>`;
+
+  const mgrCard=(m)=>{
+    const members=(m.members||[]).filter(match);
+    if(anyFilter && !members.length && !match(m)) return '';
+    const rows=members.map(u=>memberRow(u,18)).join('')
+      ||`<tr><td colspan="${isAdmin?7:6}" style="color:var(--muted);padding:14px 18px">No sales agent assigned to this manager yet.${isAdmin?' Use <b>Edit</b> on an agent and set “Reports to”.':''}</td></tr>`;
+    return `<div class="panel" style="margin-bottom:14px">
+      <div class="panel-h"><div style="display:flex;align-items:center;gap:10px">
+        <div class="avatar">${initials(m.name)}</div>
+        <div><div style="font-weight:800">${esc(m.name)} ${roleB('lead')}</div>
+          <div class="lead-sub">${esc(m.email||'')}${m.superName?' • reports to '+esc(m.superName):''}${m.team&&m.team!=='-'?' • '+teamCode(m.team):''}</div></div></div>
+        <div style="display:flex;gap:14px;align-items:center">
+          <div style="text-align:right"><div class="lead-sub">Team size</div><div style="font-weight:800;font-size:18px">${m.teamSize}</div></div>
+          <div style="text-align:right"><div class="lead-sub">Team leads</div><div style="font-weight:800;font-size:18px">${m.teamLeads}</div></div>
+          ${isAdmin?`<button class="btn ghost sm" data-action="managemembers" data-uid="${m.id}">👥 Manage team</button>
+                     <button class="btn ghost sm" data-action="edituser" data-uid="${m.id}">Edit</button>`:''}
+        </div></div>
+      <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+        <thead><tr><th>Member</th><th>Role</th><th>Product</th><th>Department</th><th>Reports to</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
+        <tbody>${rows}</tbody></table></div></div></div>`;
+  };
+
+  const superCard=(sp)=>{
+    const mine=(ts.managers||[]).filter(m=>m.manager_id===sp.id);
+    return `<div class="panel" style="margin-bottom:14px;border:2px solid #d9d0ff">
+      <div class="panel-h"><div style="display:flex;align-items:center;gap:10px">
+        <div class="avatar" style="background:#7c5cff">${initials(sp.name)}</div>
+        <div><div style="font-weight:800">${esc(sp.name)} ${roleB('super')}</div><div class="lead-sub">${esc(sp.email||'')}</div></div></div>
+        <div style="display:flex;gap:14px;align-items:center">
+          <div style="text-align:right"><div class="lead-sub">Managers</div><div style="font-weight:800;font-size:18px">${sp.managerCount}</div></div>
+          <div style="text-align:right"><div class="lead-sub">Agents</div><div style="font-weight:800;font-size:18px">${sp.teamSize}</div></div>
+          <div style="text-align:right"><div class="lead-sub">Leads</div><div style="font-weight:800;font-size:18px">${sp.teamLeads}</div></div>
+          ${isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${sp.id}">Edit</button>`:''}
+        </div></div>
+      <div class="panel-b">${mine.length?mine.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)">
+          <div class="avatar">${initials(m.name)}</div><div style="flex:1"><div class="lead-nm">${esc(m.name)}</div>
+          <div class="lead-sub">${m.teamSize} agent(s) • ${m.teamLeads} leads</div></div>
+          ${isAdmin?`<button class="btn ghost sm" data-action="managemembers" data-uid="${m.id}">👥 Manage</button>`:''}</div>`).join('')
+        :`<div class="lead-sub" style="padding:10px 0">No manager assigned under this Super Manager yet.${isAdmin?' Edit a Manager and set “Reports to”.':''}</div>`}</div></div>`;
+  };
+
+  const unassigned=(ts.unassigned||[]).filter(match);
+  const orphanPanel=unassigned.length?`<div class="panel" style="margin-bottom:14px;border:2px solid #ffd8a8">
+    <div class="panel-h" style="color:#c77700">⚠️ Not under any manager — ${unassigned.length} agent(s)
+      <span class="lead-sub" style="font-weight:400">their leads roll up to Admin only</span></div>
+    <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+      <thead><tr><th>Member</th><th>Role</th><th>Product</th><th>Department</th><th>Reports to</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
+      <tbody>${unassigned.map(u=>memberRow(u,0)).join('')}</tbody></table></div></div></div>`:'';
+
+  const treeView=`${(ts.supers||[]).map(superCard).join('')}
+    ${(ts.managers||[]).filter(m=>!(ts.supers||[]).some(sp=>sp.id===m.manager_id)).map(mgrCard).join('')}
+    ${(ts.supers||[]).length?(ts.managers||[]).filter(m=>(ts.supers||[]).some(sp=>sp.id===m.manager_id)).map(mgrCard).join(''):''}
+    ${orphanPanel}
+    ${!(ts.managers||[]).length&&!(ts.supers||[]).length?'<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">No managers yet. Add a user with the role <b>Manager</b>, then assign agents to them.</div></div>':''}`;
+
+  const flatView=`<div class="table-wrap"><table>
+    <thead><tr><th>User</th><th>Role</th><th>Product</th><th>Department</th><th>Reports to</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
+    <tbody>${people.map(u=>memberRow(u,0)).join('')||`<tr><td colspan="${isAdmin?7:6}" style="text-align:center;color:var(--muted);padding:26px">No user matches these filters.</td></tr>`}</tbody></table></div>`;
+
+  const cards=people.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
     <div class="avatar">${initials(u.name)}</div><div><div class="nm" style="font-size:14px">${esc(u.name)}</div>
-    <div class="meta">${u.team==='-'?'':teamName(u.team)} • ${esc(u.email||'no email yet')}</div></div></div>${roleB(u.role)}</div>
+    <div class="meta">${u.team==='-'?'':teamCode(u.team)} • ${esc(u.email||'no email yet')}</div>
+    <div class="meta">${u.manager_id?'↳ '+esc(mgrName(u.manager_id)):'↳ no manager'}${u.role==='sales'?' • '+u.leads+' leads':''}</div></div></div>${roleB(u.role)}</div>
     ${isAdmin?`<div class="acts" style="margin-top:10px;flex-wrap:wrap">${actionBtns(u)}</div>`:''}</div>`).join('');
-  return `<div class="page-h"><h2>Team</h2><span class="cnt">${state.users.length} users</span><div class="spacer"></div>
-    <button class="btn" data-action="adduser">+ Add User</button></div>
-    <div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Team / Product</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead><tbody>${rows}</tbody></table></div>
+
+  const counts=`${(ts.supers||[]).length} super manager(s) • ${(ts.managers||[]).length} manager(s) • ${(ts.all||[]).filter(u=>u.role==='sales').length} sales`;
+  return `<div class="page-h"><h2>Team</h2><span class="cnt">${counts}</span><div class="spacer"></div>
+    ${isAdmin?'<button class="btn" data-action="adduser">+ Add User</button>':''}</div>
+    ${filterBar}
+    ${state.teamView==='flat'?flatView:treeView}
     <div class="cards">${cards}</div>`;
+}
+
+/* Item 6 — move sales agents in and out of a manager's team in one place */
+function manageMembersModal(mid){
+  const ts=state.teamStructure||{};
+  const m=(ts.all||[]).find(x=>x.id===mid); if(!m) return;
+  const sales=(ts.all||[]).filter(u=>u.role==='sales');
+  const rows=sales.map(u=>`<label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)">
+    <input type="checkbox" class="mm-check" data-uid="${u.id}" ${u.manager_id===mid?'checked':''}>
+    <div style="flex:1"><div class="lead-nm">${esc(u.name)}</div>
+      <div class="lead-sub">${teamCode(u.team)} • ${u.leads} leads${u.manager_id&&u.manager_id!==mid?' • currently under '+esc(((ts.all||[]).find(x=>x.id===u.manager_id)||{}).name||'—'):''}</div></div>
+  </label>`).join('')||'<div class="lead-sub">No sales agents yet.</div>';
+  openModal(`<div class="modal"><div class="modal-h"><h3>👥 ${esc(m.name)}'s team</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">Tick the agents who report to <b>${esc(m.name)}</b>. Unticking moves an agent out of this team (their leads stay with them).</div>
+      <div style="max-height:46vh;overflow:auto;margin-bottom:14px">${rows}</div>
+      <button class="btn block" data-action="savemembers" data-uid="${mid}">Save team</button></div></div>`);
 }
 
 /* ---------------- CONNECTORS ---------------- */
@@ -1137,10 +1422,92 @@ function renderReports(){
     <div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Lead</th><th>Agent</th><th>Result</th><th style="text-align:right">Talk time</th><th>Recording</th></tr></thead>
     <tbody>${recRows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No calls logged yet</td></tr>'}</tbody></table></div></div></div>`;
 
+  /* ---------- item 4: CLOSED LEADS ----------
+     How many leads actually got closed, by whom, and every closed client
+     clickable so the person who closed it can be inspected. Rows can be
+     marked (tick) and only the marked ones exported.                     */
+  const cl=state.reports.closed||{total:0,won:0,lost:0,perAgent:[],leads:[]};
+  const cf=state.closedFilter||{from:'',to:'',type:''};
+  const clAgentRows=(cl.perAgent||[]).map(a=>`<tr ${a.id?`data-drillowner="${a.id}" data-drillstatus="Closed Won" style="cursor:pointer"`:''}>
+      <td><div class="lead-nm">${esc(a.name)}</div><div class="lead-sub">${a.team?teamCode(a.team):''}</div></td>
+      <td class="num" style="color:var(--green);font-weight:800">${a.won}</td>
+      <td class="num" style="color:var(--red)">${a.lost}</td>
+      <td class="num">${a.total}</td></tr>`).join('');
+  const clRows=(cl.leads||[]).map(l=>`<tr data-lead="${l.id}" style="cursor:pointer">
+      <td onclick="event.stopPropagation()"><input type="checkbox" class="closed-check" data-lead="${l.id}" ${state.closedSel[l.id]?'checked':''}></td>
+      <td><div class="lead-nm" style="color:var(--blue)">${esc(l.name)}</div><div class="lead-sub">${esc(l.phone||'')}${l.city?' • '+esc(l.city):''}</div></td>
+      <td>${badge(l.status)}</td>
+      <td><span class="pill">${teamName(l.product)}</span></td>
+      <td>${srcChip(l.source)}</td>
+      <td><b>${esc(l.owner_name||'—')}</b><div class="lead-sub">${l.owner_team?teamCode(l.owner_team):''}</div></td>
+      <td class="num">${l.calls}</td>
+      <td class="num">${l.talktime?fmtDur(l.talktime):'—'}</td>
+      <td class="lead-sub" style="white-space:nowrap">${fmtDateTime(l.closed_at)}</td></tr>`).join('');
+  const closedPanel=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px">
+      <span class="lead-sub" style="font-weight:700">📅 From</span><input type="date" id="cf_from" value="${esc(cf.from)}">
+      <span class="lead-sub" style="font-weight:700">To</span><input type="date" id="cf_to" value="${esc(cf.to)}">
+      <select id="cf_type"><option value="">Won + Lost</option><option value="won" ${cf.type==='won'?'selected':''}>Closed Won only</option><option value="lost" ${cf.type==='lost'?'selected':''}>Closed Lost only</option></select>
+      <button class="btn sm" data-action="applyclosed">Apply</button>
+      ${(cf.from||cf.to||cf.type)?'<button class="btn ghost sm" data-action="clearclosed">Clear</button>':''}
+      <div class="spacer"></div><span class="lead-sub" id="closedSelCount"></span>
+      <button class="btn ghost sm" data-action="dl-closed" data-fmt="xlsx">⬇ Excel</button>
+      <button class="btn ghost sm" data-action="dl-closed" data-fmt="pdf">⬇ PDF</button></div>
+    <div class="kpis" style="margin-bottom:14px">
+      <div class="kpi" data-drill data-fstatus="Closed Won" style="cursor:pointer;border-left:4px solid #12a150"><div class="lbl">✅ Closed Won</div><div class="val g">${cl.won}</div><div class="sub">click → won leads</div></div>
+      <div class="kpi" data-drill data-fstatus="Closed Lost" style="cursor:pointer;border-left:4px solid #e5484d"><div class="lbl">❌ Closed Lost</div><div class="val" style="color:var(--red)">${cl.lost}</div><div class="sub">click → lost leads</div></div>
+      <div class="kpi"><div class="lbl">📦 Total closed</div><div class="val b">${cl.total}</div><div class="sub">in the selected range</div></div>
+      <div class="kpi"><div class="lbl">🏆 Closers</div><div class="val">${(cl.perAgent||[]).filter(a=>a.won>0).length}</div><div class="sub">agents with a win</div></div></div>
+    <div class="panel" style="margin-bottom:14px"><div class="panel-h">Who closed how many</div>
+      <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+      <thead><tr><th>Agent</th><th style="text-align:right">Won</th><th style="text-align:right">Lost</th><th style="text-align:right">Total</th></tr></thead>
+      <tbody>${clAgentRows||'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">No closed leads in this range</td></tr>'}</tbody></table></div></div></div>
+    <div class="panel"><div class="panel-h">Closed clients <span class="lead-sub" style="font-weight:400">click any row → full client details &amp; timeline</span></div>
+      <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+      <thead><tr><th><input type="checkbox" id="closedSelAll" title="Mark all"></th><th>Client</th><th>Result</th><th>Product</th><th>Source</th><th>Closed by</th><th style="text-align:right">Calls</th><th style="text-align:right">Talk time</th><th>Closed on</th></tr></thead>
+      <tbody>${clRows||'<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:26px">No closed leads yet in this range.</td></tr>'}</tbody></table></div></div></div>`;
+
+  /* ---------- item 10: LEAD ASSIGNMENT HISTORY ---------- */
+  const ah=state.reports.assignments||{total:0,rows:[],byUser:[],toUser:[]};
+  const af=state.assignFilter||{};
+  const REASONS=[['','All actions'],['manual','Manual assign'],['round-robin','Round robin'],['import','Bulk import'],['bulk','Bulk reassign'],['transfer','User transfer'],['webhook','Auto capture']];
+  const ahRows=(ah.rows||[]).slice(0,400).map(r=>`<tr ${r.lead_id?`data-lead="${r.lead_id}" style="cursor:pointer"`:''}>
+      <td class="lead-sub" style="white-space:nowrap">${fmtDateTime(r.created_at)}</td>
+      <td><div class="lead-nm">${esc(r.lead_name||'—')}</div><div class="lead-sub">${esc(r.phone||'')}${r.product?' • '+teamCode(r.product):''}</div></td>
+      <td class="lead-sub">${esc(r.from_name||'Unassigned')}</td>
+      <td><b>${esc(r.to_name||'Unassigned')}</b></td>
+      <td>${esc(r.by_name||'System')}</td>
+      <td><span class="pill">${esc(r.reason||'manual')}</span></td></tr>`).join('');
+  const ahBy=(ah.byUser||[]).map(u=>`<tr><td>${esc(u.name)}</td><td class="num">${u.assigned}</td></tr>`).join('');
+  const ahTo=(ah.toUser||[]).map(u=>`<tr><td>${esc(u.name)}</td><td class="num">${u.received}</td></tr>`).join('');
+  const assignPanel=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px">
+      <span class="lead-sub" style="font-weight:700">📅 From</span><input type="date" id="af_from" value="${esc(af.from||'')}">
+      <span class="lead-sub" style="font-weight:700">To</span><input type="date" id="af_to" value="${esc(af.to||'')}">
+      <select id="af_by"><option value="">Assigned by — anyone</option>${state.users.map(u=>`<option value="${u.id}" ${af.by===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select>
+      <select id="af_owner"><option value="">Assigned to — anyone</option>${state.users.map(u=>`<option value="${u.id}" ${af.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select>
+      <select id="af_reason">${REASONS.map(r=>`<option value="${r[0]}" ${af.reason===r[0]?'selected':''}>${r[1]}</option>`).join('')}</select>
+      <input class="search" id="af_q" placeholder="🔍 Lead name / phone" value="${esc(af.q||'')}" style="min-width:170px">
+      <button class="btn sm" data-action="applyassign">Apply</button>
+      ${(af.from||af.to||af.owner||af.by||af.reason||af.q)?'<button class="btn ghost sm" data-action="clearassign">Clear</button>':''}
+      <div class="spacer"></div>
+      <button class="btn ghost sm" data-action="dl-assign" data-fmt="xlsx">⬇ Excel</button>
+      <button class="btn ghost sm" data-action="dl-assign" data-fmt="pdf">⬇ PDF</button></div>
+    <div class="grid2" style="margin-bottom:14px">
+      <div class="panel"><div class="panel-h">Assigned BY — who is handing out leads</div>
+        <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Leads assigned</th></tr></thead>
+        <tbody>${ahBy||'<tr><td colspan="2" style="text-align:center;color:var(--muted);padding:18px">Nothing yet</td></tr>'}</tbody></table></div></div></div>
+      <div class="panel"><div class="panel-h">Assigned TO — who is receiving them</div>
+        <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table><thead><tr><th>User</th><th style="text-align:right">Leads received</th></tr></thead>
+        <tbody>${ahTo||'<tr><td colspan="2" style="text-align:center;color:var(--muted);padding:18px">Nothing yet</td></tr>'}</tbody></table></div></div></div></div>
+    <div class="panel"><div class="panel-h">Full history — ${ah.total} record(s)
+        <span class="lead-sub" style="font-weight:400">newest first • click a row to open the lead</span></div>
+      <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
+      <thead><tr><th>When</th><th>Lead</th><th>From</th><th>To</th><th>Assigned by</th><th>How</th></tr></thead>
+      <tbody>${ahRows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:26px">No assignment recorded yet. From now on every hand-over of a lead is logged here.</td></tr>'}</tbody></table></div></div></div>`;
+
   const tab=state.reportTab||'daily';
-  const tabs=[['daily','📅 Daily Report'],['recordings','🎙️ Recordings'],['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
+  const tabs=[['daily','📅 Daily Report'],['closed','✅ Closed Leads'],['assignments','🔁 Lead Assign History'],['recordings','🎙️ Call Logs'],['attendance','🟢 Attendance'],['leadsdist','📥 Leads Distribution'],['followups','🔴 Followup Missed'],['deletions','🗑️ Deleted Leads'],['users','👥 User List']];
   const tabBar=`<div class="filters" style="gap:6px;margin-bottom:16px">${tabs.map(t=>`<button class="btn ${tab===t[0]?'':'ghost'} sm" data-action="rtab" data-tab="${t[0]}">${t[1]}</button>`).join('')}</div>`;
-  const panels={daily:dailyPanel,recordings:recPanel,attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
+  const panels={daily:dailyPanel,closed:closedPanel,assignments:assignPanel,recordings:recPanel,attendance:attPanel,leadsdist:ldPanel,followups:fuPanel,deletions:delPanel,users:usersPanel};
   return `<div class="page-h"><h2>Reports</h2><span class="cnt">click a tab • download as Excel or PDF</span></div>${tabBar}${panels[tab]||attPanel}`;
 }
 
@@ -1163,16 +1530,24 @@ function renderSearch(){
 function renderCalls(){
   const calls=state.calls||[];
   const showAgent=state.user.role!=='sales';
-  const rows=calls.map(c=>`<tr data-lead="${c.lead_id}"><td class="lead-sub">${loginTime(c.created_at)}</td>
-    <td><div class="lead-nm">${esc(c.lead_name)}</div><div class="lead-sub">${esc(c.phone||'')}</div></td>
-    ${showAgent?`<td>${esc(c.agent)}</td>`:''}
-    <td>${c.connected?'<span class="badge b-interested">Connected</span>':'<span class="badge b-lost">No answer</span>'}</td>
+  const totalTalk=calls.reduce((a,c)=>a+(c.talktime||0),0);
+  const connN=calls.filter(c=>c.connected).length;
+  const rows=calls.map(c=>`<tr data-lead="${c.lead_id}" style="cursor:pointer"><td class="lead-sub" style="white-space:nowrap">${fmtDateTime(c.created_at)}</td>
+    <td><div class="lead-nm">${esc(c.lead_name)}</div><div class="lead-sub">${esc(c.phone||'')}${c.product?' • '+teamCode(c.product):''}</div></td>
+    ${showAgent?`<td>${esc(c.by_name||c.agent)}</td>`:''}
+    <td>${c.connected?`<span class="badge b-interested">${esc(c.outcome||'Connected')}</span>`:`<span class="badge b-lost">${esc(c.outcome||'No answer')}</span>`}</td>
     <td class="num">${c.talktime?fmtDur(c.talktime):'0s'}</td>
-    <td class="lead-sub">${c.recording?`<a href="${esc(c.recording)}" target="_blank">▶ Play</a>`:'— (needs Exotel)'}</td></tr>`).join('');
-  const table=`<div class="table-wrap"><table><thead><tr><th>When</th><th>Lead</th>${showAgent?'<th>Agent</th>':''}<th>Result</th><th style="text-align:right">Talk time</th><th>Recording</th></tr></thead>
-    <tbody>${rows||`<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px">No calls logged yet</td></tr>`}</tbody></table></div>`;
-  return `<div class="page-h"><h2>📞 Call History</h2><span class="cnt">${calls.length} calls</span></div>
-    <div class="lead-sub" style="margin-bottom:12px">Every call you log (via 📞 Call now → talk time) appears here. Automatic call duration + recordings will appear once Exotel telephony is connected.</div>${table}`;
+    <td class="lead-sub">${esc(c.notes||'')}</td>
+    <td class="lead-sub">${c.recording?`<a href="${esc(c.recording)}" target="_blank">▶ Play</a>`:'—'}</td></tr>`).join('');
+  const table=`<div class="table-wrap"><table><thead><tr><th>When</th><th>Lead</th>${showAgent?'<th>Called by</th>':''}<th>Result</th><th style="text-align:right">Talk time</th><th>Note</th><th>Recording</th></tr></thead>
+    <tbody>${rows||`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No calls logged yet</td></tr>`}</tbody></table></div>`;
+  const cards=calls.slice(0,40).map(c=>`<div class="lcard" data-lead="${c.lead_id}"><div class="top">
+    <div><div class="nm">${esc(c.lead_name)}</div><div class="meta">${esc(c.phone||'')} • ${fmtDateTime(c.created_at)}</div></div>
+    ${c.connected?`<span class="badge b-interested">${esc(c.outcome||'Connected')}</span>`:`<span class="badge b-lost">${esc(c.outcome||'No answer')}</span>`}</div>
+    <div class="row"><span class="meta">⏱️ ${c.talktime?fmtDur(c.talktime):'0s'}</span>${showAgent?`<span class="meta">👤 ${esc(c.by_name||c.agent)}</span>`:''}</div>
+    ${c.notes?`<div class="meta">📝 ${esc(c.notes)}</div>`:''}</div>`).join('');
+  return `<div class="page-h"><h2>📞 Call History</h2><span class="cnt">${calls.length} calls • ${connN} connected • ${fmtDur(totalTalk)||'0s'} total talk time</span></div>
+    <div class="lead-sub" style="margin-bottom:12px">Every call made from the CRM is logged here with its outcome, talk time and note. Automatic recordings will appear once cloud telephony is connected.</div>${table}<div class="cards">${cards}</div>`;
 }
 
 /* ---------------- WHATSAPP (admin) ---------------- */
@@ -1222,8 +1597,8 @@ function renderLeadDetail(){
   } else {
     stOpt=STATUS_LIST.map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('');
   }
-  const ownOpt=assignableAgents().map(u=>`<option value="${u.id}" ${l.owner_id===u.id?'selected':''}>${u.name}</option>`).join('');
-  const fuVal=l.next_followup||'';
+  const ownOpt=ownerOptionsHTML(l.product,l.owner_id,false);
+  const fuVal=toLocalInput(l.next_followup_at||'');
   const showReminder=STATUS[l.status]?.open;  // hide reminder date for closed statuses (Not Interested, Junk, Closed)
   const canReassign=state.user.role!=='sales';
   const timeline=(l.activities||[]).slice().reverse().map(a=>`<li><div class="tt">${esc(a.title)}</div>
@@ -1245,8 +1620,11 @@ function renderLeadDetail(){
   <div class="grid2">
     <div class="panel"><div class="panel-h">Update</div><div class="panel-b">
       <div class="field"><label>Status</label><select data-action="setstatus" data-lead="${l.id}">${stOpt}</select></div>
-      ${showReminder?`<div class="field"><label>Next follow-up (reminder)</label><input type="date" value="${fuVal}" data-action="setfollow" data-lead="${l.id}"></div>`:''}
-      ${canReassign?`<div class="field"><label>Assign to (owner)</label><select data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
+      ${showReminder?`<div class="field"><label>Next follow-up (reminder — date &amp; time)</label>
+        <input type="datetime-local" value="${fuVal}" data-action="setfollow" data-lead="${l.id}">
+        <div class="lead-sub" style="margin-top:5px">${l.next_followup_at?(isDue(l.next_followup_at)?'<span style="color:var(--red)">⏰ '+fmtRemind(l.next_followup_at)+' — '+untilText(l.next_followup_at)+'</span>':'⏰ '+fmtRemind(l.next_followup_at)+' — '+untilText(l.next_followup_at)):'No reminder set'}</div></div>`:''}
+      ${canReassign?`<div class="field"><label>Product</label><select id="ld_product" data-action="setproduct" data-lead="${l.id}">${Object.keys(CFG().teams).map(pk=>`<option value="${pk}" ${l.product===pk?'selected':''}>${teamName(pk)}</option>`).join('')}</select></div>
+      <div class="field"><label>Assign to (owner) <span class="lead-sub">— agents of this product</span></label><select id="ld_owner" data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
       <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Write a call summary…"></textarea></div>
       <button class="btn block" data-action="addnote" data-lead="${l.id}">Save note</button></div></div>
     <div class="panel"><div class="panel-h">Activity Timeline</div><div class="panel-b"><ul class="timeline">${timeline}</ul></div></div></div>`;
@@ -1258,9 +1636,13 @@ function openModal(html){const bg=document.createElement('div');bg.className='mo
 function closeModal(){const m=document.getElementById('modalBg');if(m)m.remove();}
 
 function addLeadModal(){
-  const owOpt='<option value="auto">⚡ Auto — Round Robin (recommended)</option>'+assignableAgents().map(u=>`<option value="${u.id}">${esc(u.name)} (${teamCode(u.team)})</option>`).join('');
+  if(!canAddLead()){ alert('Only Admin and Managers can add leads.'); return; }
+  const products=Object.keys(CFG().teams);
+  const firstProduct=products[0]||'';
+  // Item 3 — owner list is filtered to the selected product from the very first paint
+  const owOpt=ownerOptionsHTML(firstProduct,'',true);
   const srOpt=srcList().map(s=>`<option>${s}</option>`).join('');
-  const prOpt=Object.keys(CFG().teams).map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
+  const prOpt=products.map(p=>`<option value="${p}">${teamName(p)}</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add New Lead</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nl_name" placeholder="Customer name"></div>
@@ -1269,7 +1651,7 @@ function addLeadModal(){
       <div class="field"><label>City</label><input id="nl_city"></div>
       <div class="field"><label>Product</label><select id="nl_product">${prOpt}</select></div>
       <div class="field"><label>Source</label><select id="nl_source">${srOpt}</select></div>
-      <div class="field"><label>Assign to</label><select id="nl_owner">${owOpt}</select></div>
+      <div class="field"><label>Assign to <span class="lead-sub">(only agents of the chosen product)</span></label><select id="nl_owner">${owOpt}</select></div>
       <button class="btn block" data-action="savelead">Add Lead</button></div></div>`);
 }
 function addProductModal(){
@@ -1289,7 +1671,9 @@ function addUserModal(){
       <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nu_name" placeholder="e.g. User 1"></div>
       <div class="field"><label>Email (login id) <span style="color:var(--red)">*</span></label><input id="nu_email" type="email" placeholder="person@myhaulstore.com"></div>
       <div class="field"><label>Phone <span class="lead-sub">(optional)</span></label><input id="nu_phone" placeholder="+91 …"></div>
-      <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Team Lead</option><option value="admin">Admin</option></select></div>
+      <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Manager</option><option value="super">Super Manager</option><option value="admin">Admin</option></select></div>
+      <div class="field"><label>Reports to <span class="lead-sub">(Sales → a Manager; Manager → a Super Manager)</span></label>
+        <select id="nu_mgr"><option value="">— none —</option>${state.users.filter(x=>x.role==='lead'||x.role==='super').map(x=>`<option value="${x.id}">${esc(x.name)} (${esc(roleLabel(x.role))})</option>`).join('')}</select></div>
       <div class="field"><label>Team / Product</label><select id="nu_team">${teamOpt}</select></div>
       <div class="field"><label>Department</label><input id="nu_dept" placeholder="e.g. Pre Sales / TFD Sales"></div>
       <div class="field"><label>Password <span class="lead-sub">(leave blank for 123456)</span></label><input id="nu_pwd" placeholder="at least 6 characters"></div>
@@ -1298,16 +1682,17 @@ function addUserModal(){
 function editUserModal(uid){
   const u=state.users.find(x=>x.id===uid); if(!u)return;
   const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}" ${u.team===k?'selected':''}>${teamName(k)}</option>`).join('');
-  const roleOpt=[['sales','Sales'],['lead','Team Lead'],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${r[1]}</option>`).join('');
-  const tls=state.users.filter(x=>x.role==='lead');
-  const mgrOpt='<option value="">— No Team Lead —</option>'+tls.map(x=>`<option value="${x.id}" ${u.manager_id===x.id?'selected':''}>${esc(x.name)} (${teamCode(x.team)})</option>`).join('');
+  const roleOpt=[['sales','Sales'],['lead','Manager'],['super','Super Manager'],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${r[1]}</option>`).join('');
+  /* a Sales agent reports to a Manager; a Manager reports to a Super Manager */
+  const tls=state.users.filter(x=>x.id!==u.id && (u.role==='lead'?x.role==='super':(x.role==='lead'||x.role==='super')));
+  const mgrOpt='<option value="">— No manager —</option>'+tls.map(x=>`<option value="${x.id}" ${u.manager_id===x.id?'selected':''}>${esc(x.name)} (${esc(roleLabel(x.role))}${x.team&&x.team!=='-'?' • '+teamCode(x.team):''})</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>Edit User</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="field"><label>Name</label><input id="eu_name" value="${esc(u.name)}"></div>
       <div class="field"><label>Phone</label><input id="eu_phone" value="${esc(u.phone||'')}" placeholder="+91 …"></div>
       <div class="field"><label>Role</label><select id="eu_role">${roleOpt}</select></div>
       <div class="field"><label>Team / Product</label><select id="eu_team">${teamOpt}</select></div>
-      <div class="field"><label>Reports to (Team Lead) <span class="lead-sub">assign this sales agent to a TL</span></label><select id="eu_mgr">${mgrOpt}</select></div>
+      <div class="field"><label>Reports to <span class="lead-sub">— this drives what they can see on their dashboard</span></label><select id="eu_mgr">${mgrOpt}</select></div>
       <div class="field"><label>Department</label><input id="eu_dept" value="${esc(u.department||'')}"></div>
       <div class="field"><label>Email (login id)${u.email?'':' <span style="color:var(--red)">— missing, this user cannot sign in</span>'}</label><input id="eu_email2" type="email" value="${esc(u.email||'')}" placeholder="person@myhaulstore.com"></div>
       <div class="field"><label>Reset password <span class="lead-sub">(leave blank to keep current)</span></label><input id="eu_pwd" placeholder="at least 6 characters"></div>
@@ -1354,23 +1739,103 @@ function passwordModal(){
       <div class="field"><label>Repeat new password</label><input id="pw_rep" type="password" autocomplete="new-password"></div>
       <button class="btn block" data-action="savepassword">Change password</button></div></div>`);
 }
-function callLogModal(id){
-  const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,'');
-  openModal(`<div class="modal"><div class="modal-h"><h3>📞 Call ${esc(l?l.name:'')}</h3><span class="x" data-action="closemodal">×</span></div>
-    <div class="modal-b">
-      <a class="btn block" href="tel:${ph}" style="margin-bottom:14px;text-align:center;display:block">📞 Dial ${esc(l?l.phone:'')}</a>
-      <div class="lead-sub" style="margin-bottom:10px">After the call, log how long you talked so Talk Time shows on the dashboard.</div>
-      <div class="field"><label>Connected?</label><select id="cl_conn"><option value="1">Yes — connected</option><option value="0">No answer</option></select></div>
-      <div class="field"><label>Talk time (minutes)</label><input id="cl_min" type="number" min="0" placeholder="e.g. 3"></div>
-      <button class="btn block" data-action="savecall" data-lead="${id}">Save call log</button></div></div>`);
+/* ============================================================
+   IN-CRM CALLING (item 2) + REMINDER ON EVERY CALL (item 5)
+   The phone still places the call — what the CRM owns is the log.
+   One modal handles the whole loop: dial → live timer → outcome →
+   status → reminder (date AND time) → note, saved in one request so
+   the POC never has to remember a second step after hanging up.
+   ============================================================ */
+let CALL={t0:0,secs:0,timer:null};
+function callTick(){
+  CALL.secs=Math.max(0,Math.floor((Date.now()-CALL.t0)/1000));
+  const c=document.getElementById('cl_clock'); if(c) c.textContent=fmtDur(CALL.secs)||'0s';
+  const h=document.getElementById('cl_secs'); if(h) h.value=CALL.secs;
 }
+function callStart(){ if(CALL.timer) return;
+  CALL.t0=Date.now()-CALL.secs*1000; CALL.timer=setInterval(callTick,1000); callTick();
+  const b=document.getElementById('cl_startstop'); if(b) b.textContent='⏹ Stop timer'; }
+function callStop(){ if(CALL.timer){ clearInterval(CALL.timer); CALL.timer=null; }
+  const b=document.getElementById('cl_startstop'); if(b) b.textContent='▶ Resume timer'; }
+function callReset(){ callStop(); CALL.secs=0; CALL.t0=0; }
+/* quick reminder presets — exactly the things clients actually say */
+const REM_PRESETS=[['1 hour',60],['3 hours',180],['Tomorrow 10am','t10'],['2 days',2880],['1 week',10080]];
+function presetToValue(v){
+  if(v==='t10'){ const d=new Date(Date.now()+86400000); return istDateStr(d)+' 10:00'; }
+  return istPlusMinutes(+v);
+}
+const toLocalInput=s2=>String(s2||'').replace(' ','T').slice(0,16);
+
+function callFlowModal(id){
+  const l=findLeadLocal(id); if(!l) return;
+  callReset();
+  const ph=String(l.phone||'').replace(/[^\d+]/g,'');
+  const waPh=String(l.phone||'').replace(/\D/g,'');
+  const isSales=state.user.role==='sales';
+  const stOpt=['— keep as '+l.status+' —'].map(()=>`<option value="">— keep as ${esc(l.status)} —</option>`).join('')
+    + STATUS_LIST.filter(x=>!(isSales&&x==='Fresh')).map(x=>`<option value="${x}">${x}</option>`).join('');
+  const presets=REM_PRESETS.map(pp=>`<button type="button" class="btn ghost sm" data-action="rempreset" data-val="${pp[1]}">${pp[0]}</button>`).join(' ');
+  openModal(`<div class="modal"><div class="modal-h"><h3>📞 Call ${esc(l.name)}</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <a class="btn" href="tel:${ph}" data-action="dialnow" style="flex:1;text-align:center" data-lead="${id}">📞 Dial ${esc(l.phone||'')}</a>
+        <a class="btn ghost" href="https://wa.me/${waPh}" target="_blank" style="text-align:center">🟢 WhatsApp</a>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:14px;display:flex;align-items:center;gap:12px">
+        <div style="flex:1"><div class="lead-sub">Talk time</div>
+          <div id="cl_clock" style="font-size:26px;font-weight:800;font-variant-numeric:tabular-nums">0s</div></div>
+        <button type="button" class="btn ghost sm" id="cl_startstop" data-action="calltimer">▶ Start timer</button>
+      </div>
+      <input type="hidden" id="cl_secs" value="0">
+      <div class="field"><label>How did the call go?</label>
+        <select id="cl_outcome">
+          <option value="Connected">✅ Connected — spoke to them</option>
+          <option value="Interested">🔥 Interested</option>
+          <option value="Callback requested">⏰ Asked to call back later</option>
+          <option value="Not connected">📵 Rang out / no answer</option>
+          <option value="Busy">📵 Busy</option>
+          <option value="Switched off">📵 Switched off / unreachable</option>
+          <option value="Wrong number">❌ Wrong number</option>
+        </select></div>
+      <div class="field"><label>Move lead to</label><select id="cl_status">${stOpt}</select></div>
+      <div class="field"><label>⏰ Remind me to call again <span class="lead-sub">(date and time)</span></label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${presets}
+          <button type="button" class="btn ghost sm" data-action="rempreset" data-val="clear">✕ None</button></div>
+        <input type="datetime-local" id="cl_rem" value="">
+        <div class="lead-sub" id="cl_remhint" style="margin-top:5px">No reminder set — pick one above or choose your own date &amp; time.</div></div>
+      <div class="field"><label>Note <span class="lead-sub">(what was discussed)</span></label>
+        <textarea id="cl_note" rows="2" placeholder="e.g. wants pricing, will decide after Diwali"></textarea></div>
+      <button class="btn block" data-action="savecallflow" data-lead="${id}">Save call log</button>
+      <div class="lead-sub" style="margin-top:8px;text-align:center">Saved to this lead's timeline, Call History and the daily report.</div>
+    </div></div>`);
+}
+/* kept for the older "log a call" entry points */
+function callLogModal(id){ return callFlowModal(id); }
+
 function reminderModal(id, status){
-  const today=todayStr();
+  const presets=REM_PRESETS.map(pp=>`<button type="button" class="btn ghost sm" data-action="rempreset" data-val="${pp[1]}">${pp[0]}</button>`).join(' ');
+  const dflt=toLocalInput(presetToValue('t10'));
   openModal(`<div class="modal"><div class="modal-h"><h3>⏰ Set a reminder (required)</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
-      <div class="lead-sub" style="margin-bottom:10px">A follow-up reminder is required for status <b>${esc(status)}</b>. The lead will appear in Follow-ups on this date.</div>
-      <div class="field"><label>Next follow-up date <span style="color:var(--red)">*</span></label><input type="date" id="rem_date" value="${today}" min="${today}"></div>
+      <div class="lead-sub" style="margin-bottom:10px">A follow-up reminder is required for status <b>${esc(status)}</b>. It will show on the dashboard at this date and time.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${presets}</div>
+      <div class="field"><label>Call again on <span style="color:var(--red)">*</span></label>
+        <input type="datetime-local" id="cl_rem" value="${dflt}"></div>
+      <div class="lead-sub" id="cl_remhint" style="margin-bottom:10px"></div>
       <button class="btn block" data-action="savereminder" data-lead="${id}" data-status="${esc(status)}">Save status + reminder</button></div></div>`);
+}
+/* standalone "change the reminder" from the lead page */
+function editReminderModal(id){
+  const l=findLeadLocal(id);
+  const presets=REM_PRESETS.map(pp=>`<button type="button" class="btn ghost sm" data-action="rempreset" data-val="${pp[1]}">${pp[0]}</button>`).join(' ');
+  openModal(`<div class="modal"><div class="modal-h"><h3>⏰ Reminder</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="lead-sub" style="margin-bottom:10px">Current: <b>${l&&l.next_followup_at?fmtRemind(l.next_followup_at):'none'}</b></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${presets}
+        <button type="button" class="btn ghost sm" data-action="rempreset" data-val="clear">✕ Clear</button></div>
+      <div class="field"><label>Call again on</label><input type="datetime-local" id="cl_rem" value="${toLocalInput((l&&l.next_followup_at)||'')}"></div>
+      <div class="lead-sub" id="cl_remhint" style="margin-bottom:10px"></div>
+      <button class="btn block" data-action="saveremonly" data-lead="${id}">Save reminder</button></div></div>`);
 }
 
 /* ============================================================ EVENTS ============================================================ */
@@ -1401,6 +1866,27 @@ document.addEventListener('click',async function(e){
     if(a==='adduser'){ return addUserModal(); }
     if(a==='clearsample'){ if(confirm('Remove all pre-loaded demo/sample leads? Your real imported leads will NOT be touched. This cannot be undone.')){ const r=await api('/api/admin/clear-sample','POST',{}); state.toastMsg='🗑️ '+(r.removed||0)+' sample leads removed'; return refresh(); } return; }
     if(a==='edituser'){ return editUserModal(act.dataset.uid); }
+    if(a==='managemembers'){ return manageMembersModal(act.dataset.uid); }
+    if(a==='savemembers'){ const mid=act.dataset.uid;
+      const boxes=[...document.querySelectorAll('.mm-check')];
+      const ts=state.teamStructure||{all:[]};
+      let changed=0;
+      for(const b of boxes){ const uid=b.dataset.uid;
+        const cur=((ts.all||[]).find(x=>x.id===uid)||{}).manager_id||'';
+        const want=b.checked?mid:(cur===mid?'':cur);
+        if(want!==cur){ const r=await api('/api/users/'+uid,'PATCH',{manager_id:want}); if(r&&r.error){ alert(r.error); return; } changed++; } }
+      closeModal(); state.toastMsg=changed?'👥 Team updated — '+changed+' change(s)':'No changes'; return refresh(); }
+    if(a==='teamview'){ state.teamView=act.dataset.view; return render(); }
+    if(a==='clearteamfilter'){ state.teamFilter={q:'',role:'',team:'',manager:'',dept:'',status:''}; return render(); }
+    if(a==='dl-team'){ return exportTeam(); }
+    if(a==='applyclosed'){ state.closedFilter={from:gv('cf_from'),to:gv('cf_to'),type:(document.getElementById('cf_type')||{}).value||''}; return refresh(); }
+    if(a==='clearclosed'){ state.closedFilter={from:'',to:'',type:''}; return refresh(); }
+    if(a==='dl-closed'){ return exportClosed(act.dataset.fmt); }
+    if(a==='applyassign'){ state.assignFilter={from:gv('af_from'),to:gv('af_to'),
+      owner:(document.getElementById('af_owner')||{}).value||'', by:(document.getElementById('af_by')||{}).value||'',
+      reason:(document.getElementById('af_reason')||{}).value||'', q:gv('af_q')}; return refresh(); }
+    if(a==='clearassign'){ state.assignFilter={from:'',to:'',owner:'',by:'',reason:'',q:''}; return refresh(); }
+    if(a==='dl-assign'){ return exportAssignments(act.dataset.fmt); }
     if(a==='transferuser'){ return transferUserModal(act.dataset.uid); }
     if(a==='saveedituser'){ const uid=act.dataset.uid; const name=gv('eu_name'); if(!name){alert('Enter a name');return;}
       const body={name,email:gv('eu_email2'),phone:gv('eu_phone'),role:document.getElementById('eu_role').value,team:document.getElementById('eu_team').value,department:gv('eu_dept'),manager_id:(document.getElementById('eu_mgr')||{}).value||''};
@@ -1414,9 +1900,11 @@ document.addEventListener('click',async function(e){
       if(confirm('Delete user '+(u?u.name:'')+'?\nTheir leads will become unassigned — use "Transfer leads" first if you want to keep them.')){
         const r=await api('/api/users/'+uid,'DELETE'); if(r.error){alert(r.error);return;}
         state.toastMsg='User deleted'+(r.unassigned?' — '+r.unassigned+' leads unassigned':''); return refresh(); } return; }
-    if(a==='savereminder'){ const date=gv('rem_date'); if(!date){alert('Please pick a date');return;}
-      const r=await api('/api/leads/'+id,'PATCH',{status:act.dataset.status,next_followup:date}); if(r.error){alert(r.error);return;}
-      closeModal(); state.toastMsg='Status + reminder set ✓'; return refresh(); }
+    if(a==='savereminder'){ const raw=(document.getElementById('cl_rem')||{}).value||'';
+      if(!raw){alert('Please pick a date and time');return;}
+      const r=await api('/api/leads/'+id,'PATCH',{status:act.dataset.status,next_followup_at:raw.replace('T',' ')});
+      if(r.error){alert(r.error);return;}
+      closeModal(); state.toastMsg='Status + reminder set ✓ — '+fmtRemind(raw.replace('T',' ')); return refresh(); }
     if(a==='deletelead'){ if(confirm('Delete this lead? It will be recorded in the delete report.')){ await api('/api/leads/'+id,'DELETE'); state.toastMsg='🗑️ Lead deleted'; return go(state.user.role==='sales'?'myleads':'leads'); } return; }
     if(a==='rtab'){ state.reportTab=act.dataset.tab; return render(); }
     if(a==='dosearch'){ state.searchQ=gv('searchBox'); return go('search'); }
@@ -1499,16 +1987,38 @@ document.addEventListener('click',async function(e){
       const name=gv('nu_name'); if(!name){alert('Enter a name');return;}
       const email=gv('nu_email'); if(!email.includes('@')){alert('Enter a valid email — it is the login id');return;}
       const pwd=gv('nu_pwd'); if(pwd&&pwd.length<6){alert('Password must be at least 6 characters');return;}
-      const r=await api('/api/users','POST',{name,email,phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),password:pwd||undefined});
+      const r=await api('/api/users','POST',{name,email,phone:gv('nu_phone'),role:document.getElementById('nu_role').value,team:document.getElementById('nu_team').value,department:gv('nu_dept'),manager_id:(document.getElementById('nu_mgr')||{}).value||'',password:pwd||undefined});
       if(r.error){alert(r.error);return;}
       closeModal(); state.toastMsg=name+' added — login: '+email+' / '+(pwd||'123456'); if(state.route==='users') return refresh(); return; }
     if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
     if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
-    if(a==='callnow'){ return callLogModal(id); }
-    if(a==='savecall'){ const min=Math.max(0,+gv('cl_min')||0); const conn=(document.getElementById('cl_conn')||{}).value||'1';
-      await api('/api/leads/'+id+'/call','POST',{talktime:min*60,connected:+conn}); closeModal();
-      state.toastMsg='📞 Call logged'+(min?' — '+min+' min talk time':''); return refresh(); }
-    if(a==='call'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/[^\d+]/g,''); if(ph){try{window.location.href='tel:'+ph;}catch(_){}} await api('/api/leads/'+id+'/call','POST',{}); state.toastMsg='📞 Opening dialer'+(l?' — '+l.name:'')+'…'; return refresh(); }
+    if(a==='callnow'||a==='call'){ return callFlowModal(id); }
+    if(a==='editreminder'){ return editReminderModal(id); }
+    if(a==='calltimer'){ if(CALL.timer) callStop(); else callStart(); return; }
+    if(a==='dialnow'){ callStart(); return; }   // dialing starts the clock; the tel: link still opens
+    if(a==='rempreset'){ const v=act.dataset.val; const box=document.getElementById('cl_rem'); if(!box) return;
+      box.value=(v==='clear')?'':toLocalInput(presetToValue(v)); return updateRemHint(); }
+    if(a==='saveremonly'){ const raw=(document.getElementById('cl_rem')||{}).value||'';
+      const r=await api('/api/leads/'+id+'/reminder','POST',{next_followup_at:raw?raw.replace('T',' '):''});
+      if(r.error){ alert(r.error); return; }
+      closeModal(); state.toastMsg=raw?'⏰ Reminder set — '+fmtRemind(raw.replace('T',' ')):'⏰ Reminder cleared'; return refresh(); }
+    if(a==='savecallflow'){
+      const secs=Math.max(0,+((document.getElementById('cl_secs')||{}).value||0));
+      const outcome=(document.getElementById('cl_outcome')||{}).value||'Connected';
+      const status=(document.getElementById('cl_status')||{}).value||'';
+      const raw=(document.getElementById('cl_rem')||{}).value||'';
+      const note=gv('cl_note');
+      const NEEDS=['RNR','Follow Up','Interested'];
+      if(status&&NEEDS.includes(status)&&!raw){ alert('This status needs a reminder — pick when to call again.'); return; }
+      const connected=/Not connected|Busy|Switched off|Wrong number/.test(outcome)?0:1;
+      const body={talktime:secs,connected,outcome,notes:note};
+      if(raw) body.next_followup_at=raw.replace('T',' ');
+      if(status) body.status=status;
+      const r=await api('/api/leads/'+id+'/call','POST',body);
+      if(r.error){ alert(r.error==='reminder_required'?'Please set a reminder for this status.':r.error); return; }
+      callReset(); closeModal();
+      state.toastMsg='📞 Call logged'+(secs?' — '+fmtDur(secs):'')+(raw?' • reminder '+fmtRemind(raw.replace('T',' ')):'');
+      return refresh(); }
     if(a==='wa'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/\D/g,''); if(ph){try{window.open('https://wa.me/'+ph+'?text='+encodeURIComponent('Hi '+(l?l.name.split(' ')[0]:'')),'_blank');}catch(_){}} await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='🟢 Opening WhatsApp…'; return refresh(); }
     if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 No answer → '+(r.steps||[]).join(' + ')+'. Lead kept open.'; return refresh(); }
     if(a==='addnote'){ const v=gv('noteBox'); if(v){ await api('/api/leads/'+id+'/activity','POST',{title:'📝 Note',sub:v}); state.toastMsg='Note saved'; return refresh(); } return; }
@@ -1528,8 +2038,21 @@ function updateSelUI(){ const n=Object.keys(selLeads).length;
   document.querySelectorAll('.lead-check').forEach(c=>{ c.checked=!!selLeads[c.dataset.lead]; });
   const all=document.getElementById('selAll'); if(all){ const ids=[...new Set([...document.querySelectorAll('.lead-check')].map(c=>c.dataset.lead))]; all.checked=ids.length>0&&ids.every(id=>selLeads[id]); }
 }
+function updateRemHint(){ const box=document.getElementById('cl_rem'); const h=document.getElementById('cl_remhint');
+  if(!box||!h) return;
+  if(!box.value){ h.textContent='No reminder set.'; h.style.color=''; return; }
+  const v=box.value.replace('T',' ');
+  h.textContent='Reminder: '+fmtRemind(v)+' ('+untilText(v)+')';
+  h.style.color=isDue(v)?'var(--red)':''; }
+
 document.addEventListener('change',async function(e){
   const el=e.target;
+  if(el.id==='cl_rem'){ return updateRemHint(); }
+  /* Item 3 — the product picker drives the owner list */
+  if(el.id==='nl_product'){ const ow=document.getElementById('nl_owner');
+    if(ow) ow.innerHTML=ownerOptionsHTML(el.value,'',true); return; }
+  if(el.id==='ld_product'){ const ow=document.getElementById('ld_owner');
+    if(ow) ow.innerHTML=ownerOptionsHTML(el.value,(state.currentLead||{}).owner_id,false); return; }
   if(el.id==='importFile'){ return parseImportFile(el.files[0]); }
   if(el.id==='importProduct'||el.id==='importOwner'){ if(IMPORT_ROWS.length) renderImportPreview(); return; }
   if(el.id==='pageSize'){ state.leadPageSize=+el.value||25; state.leadPage=1; return render(); }
@@ -1546,8 +2069,21 @@ document.addEventListener('change',async function(e){
     const r=await api('/api/leads/'+id,'PATCH',{status:st});
     if(r&&r.error==='reminder_required'){ return reminderModal(id, st); }
     state.toastMsg=(STATUS[st]?.won?'🎉 WON! Pushed to Customer CRM.':'Status updated'); return refresh(); }
-  if(a==='setfollow'){ await api('/api/leads/'+id,'PATCH',{next_followup:el.value||null}); state.toastMsg='Reminder set'; return refresh(); }
-  if(a==='setowner'){ await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
+  if(a==='setfollow'){ await api('/api/leads/'+id+'/reminder','POST',{next_followup_at:el.value?el.value.replace('T',' '):''});
+    state.toastMsg=el.value?'⏰ Reminder set — '+fmtRemind(el.value.replace('T',' ')):'⏰ Reminder cleared'; return refresh(); }
+  if(a==='setowner'){ if(!el.value) return; await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
+  if(a==='setproduct'){ const r=await api('/api/leads/'+id,'PATCH',{product:el.value}); if(r&&r.error){alert(r.error);return refresh();}
+    state.toastMsg='📦 Product changed to '+teamCode(el.value)+' — pick the new owner'; return refresh(); }
+  if(el.id&&el.id.startsWith('tf_')){ const k={tf_q:'q',tf_role:'role',tf_team:'team',tf_manager:'manager',tf_dept:'dept',tf_status:'status'}[el.id];
+    if(k){ state.teamFilter=Object.assign({},state.teamFilter,{[k]:el.value}); return render(); } }
+  if(el.classList&&el.classList.contains('closed-check')){ const id=el.dataset.lead;
+    if(el.checked) state.closedSel[id]=1; else delete state.closedSel[id];
+    const n=Object.keys(state.closedSel).length; const c=document.getElementById('closedSelCount');
+    if(c) c.textContent=n?n+' marked':''; return; }
+  if(el.id==='closedSelAll'){ const boxes=[...document.querySelectorAll('.closed-check')];
+    boxes.forEach(b=>{ b.checked=el.checked; if(el.checked) state.closedSel[b.dataset.lead]=1; else delete state.closedSel[b.dataset.lead]; });
+    const c=document.getElementById('closedSelCount'); const n=Object.keys(state.closedSel).length;
+    if(c) c.textContent=n?n+' marked':''; return; }
   if(el.id==='fstatus'){ state.filters.status=el.value; return refresh(); }
   if(el.id==='fsource'){ state.filters.source=el.value; return refresh(); }
   if(el.id==='fowner'){ state.filters.owner=el.value; return refresh(); }
@@ -1558,6 +2094,9 @@ document.addEventListener('change',async function(e){
 
 let searchTimer=null;
 document.addEventListener('input',function(e){
+  if(e.target.id==='tf_q'){ const pos=e.target.selectionStart;
+    state.teamFilter=Object.assign({},state.teamFilter,{q:e.target.value}); render();
+    const box=document.getElementById('tf_q'); if(box){ box.focus(); try{box.setSelectionRange(pos,pos);}catch(_){} } return; }
   if(e.target.id==='fq'){ state.filters.q=e.target.value; clearTimeout(searchTimer);
     searchTimer=setTimeout(async()=>{ const box=document.getElementById('fq'); const pos=box?box.selectionStart:null;
       await refresh(); const nb=document.getElementById('fq'); if(nb){ nb.focus(); if(pos!=null){try{nb.setSelectionRange(pos,pos);}catch(_){}} } },250); }
