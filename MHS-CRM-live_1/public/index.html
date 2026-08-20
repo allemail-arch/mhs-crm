@@ -22,6 +22,21 @@
   input,select,textarea{font-family:inherit;font-size:14px}
   a{color:var(--blue);text-decoration:none}
   .hidden{display:none !important}
+  /* ---------- multi-select filter (checkbox dropdown) ----------
+     A native <select multiple> needs ctrl-click and shows no summary, so team
+     filters use this: one button that says what is picked, and a tick-list. */
+  .ms{position:relative;display:inline-block}
+  .ms-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);
+    border-radius:10px;background:#fff;font-size:14px;color:var(--text);max-width:230px}
+  .ms-btn.on{border-color:var(--blue);color:var(--blue);font-weight:700}
+  .ms-btn .cap{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ms-pop{position:absolute;z-index:60;top:calc(100% + 4px);left:0;min-width:220px;max-height:300px;
+    overflow:auto;background:#fff;border:1px solid var(--line);border-radius:12px;
+    box-shadow:0 12px 30px rgba(20,33,61,.16);padding:6px}
+  .ms-pop label{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px;font-size:13.5px}
+  .ms-pop label:hover{background:var(--bg)}
+  .ms-foot{display:flex;gap:6px;padding:6px 4px 2px;border-top:1px solid var(--line);margin-top:4px}
+  .ms-foot button{flex:1;padding:6px 4px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:12px;white-space:nowrap}
   .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;
     background:linear-gradient(135deg,#14213d 0%,#1d3a63 60%,#2d5be3 130%);padding:20px}
   .login-card{background:#fff;border-radius:20px;box-shadow:var(--shadow);width:100%;max-width:400px;
@@ -197,7 +212,7 @@ const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, log
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:'',team:''},
   searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25,
-  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0,
+  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0, msOpen:'',
   teamFilter:{q:'',role:'',team:'',manager:'',dept:'',status:''},
   closedFilter:{from:'',to:'',type:''}, assignFilter:{from:'',to:'',owner:'',by:'',reason:'',q:''}, closedSel:{} };
 
@@ -205,10 +220,54 @@ const CFG=()=>state.cfg||{teams:{}};
 const teamName=k=>esc(CFG().teams[k]?.name||k);
 const teamCode=k=>CFG().teams[k]?.code||k;
 const salesUsers=()=>state.users.filter(u=>u.role==='sales');
-/* admin > super (Super Manager) > lead (Manager) > sales */
-const ROLE_LABEL={admin:'Admin',super:'Super Manager',lead:'Manager',sales:'Sales'};
+/* admin > super > lead > sales.
+   The role KEYS are untouched (every stored user row keeps working); only the
+   words people read changed in Aug 2026:
+     super  'Super Manager' -> 'Manager'
+     lead   'Manager'       -> 'TL'
+   The server sends the same map in /api/me, so it stays the single source. */
+const ROLE_LABEL={admin:'Admin',super:'Manager',lead:'TL',sales:'Sales'};
 const roleLabel=r=>((CFG().roleLabels||ROLE_LABEL)[r])||r;
 const isManagerRole=r=>r==='admin'||r==='super'||r==='lead';
+/* Calling belongs to the Sales POC. A Manager or TL supervises the calls and
+   reads them in Call History / Reports, but never dials from the CRM — so the
+   dialer, the "Call" buttons and "No answer" are hidden for them. The server
+   rejects the same roles, so hiding the button is not the only guard. */
+function canCall(){ const r=state.user&&state.user.role; return ((CFG().callRoles)||['admin','sales']).includes(r); }
+
+/* ============================================================
+   MULTI-SELECT FILTER  (team / product pickers)
+   One filter value can hold several choices. It is kept in state as a
+   comma-joined string ('TPA,TFD') so every existing query-string, export
+   and "is a filter active?" check keeps working unchanged — one choice is
+   simply a list of one. msVals()/msJoin() convert at the edges.
+   ============================================================ */
+const msVals=v=>Array.isArray(v)?v.filter(Boolean):String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
+const msJoin=a=>a.filter(Boolean).join(',');
+/* every multi-select on screen: how to read it and how to write it back */
+const MS_FIELDS={
+  dteam:    { get:()=>msVals(state.dashFilter.team), set:v=>{ state.dashFilter.team=msJoin(v); } },
+  tf_team:  { get:()=>msVals((state.teamFilter||{}).team), set:v=>{ state.teamFilter=Object.assign({},state.teamFilter,{team:msJoin(v)}); } },
+  dailyTeam:{ get:()=>msVals(state.dailyTeam), set:v=>{ state.dailyTeam=msJoin(v); } },
+};
+/* opts = [[value,label],...]  ·  allLabel = what the button says when nothing is picked */
+function multiSelect(id,allLabel,opts){
+  const f=MS_FIELDS[id]; const sel=f?f.get():[];
+  const known=opts.filter(o=>sel.includes(o[0]));
+  const cap=!sel.length?allLabel:(known.length===1?known[0][1]:(sel.length+' selected'));
+  const open=state.msOpen===id;
+  const list=opts.map(o=>`<label><input type="checkbox" class="ms-box" data-ms="${id}" data-val="${esc(o[0])}" ${sel.includes(o[0])?'checked':''}><span>${o[1]}</span></label>`).join('');
+  return `<span class="ms" data-msbox="${id}">
+    <button type="button" class="ms-btn ${sel.length?'on':''}" data-action="mstoggle" data-ms="${id}" title="${esc(allLabel)}">
+      <span class="cap">${esc(cap)}</span><span>${open?'\u25b4':'\u25be'}</span></button>
+    ${open?`<div class="ms-pop">${list}
+      <div class="ms-foot"><button type="button" data-action="msall" data-ms="${id}">Select all</button>
+        <button type="button" data-action="msclear" data-ms="${id}">Clear</button>
+        <button type="button" data-action="msdone" data-ms="${id}">Done</button></div></div>`:''}
+  </span>`;
+}
+/* the team/product options every multi-select above shares */
+const teamOptsList=()=>Object.keys(CFG().teams||{}).map(k=>[k,teamName(k)]);
 /* Add Lead is a manager job — Sales work the leads they are given.
    The server enforces the same list, this only hides the button. */
 function canAddLead(){ const r=state.user&&state.user.role; return ((CFG().addLeadRoles)||['admin','super','lead']).includes(r); }
@@ -235,7 +294,7 @@ function ownerOptionsHTML(product,selected,withAuto){
   return html;
 }
 const userById=id=>state.users.find(u=>u.id===id);
-/* only Admin + Team Lead may bulk-upload leads (server enforces this too) */
+/* only Admin + TL may bulk-upload leads (server enforces this too) */
 function canImport(){ const r=state.user&&state.user.role; const roles=(CFG().importRoles)||['admin','lead']; return roles.includes(r); }
 const initials=n=>String(n||'').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
 /* escape ALL user-provided text before putting it in innerHTML (prevents XSS) */
@@ -383,12 +442,12 @@ function exportTeam(){
   const head=['Name','Role','Product','Department','Email','Phone','Reports to','Leads','Active'];
   const body=ts.all.map(u=>[u.name,roleLabel(u.role),u.team==='-'?'':teamName(u.team),u.department||'',u.email||'',u.phone||'',
     (byId[u.manager_id]||{}).name||'',u.role==='sales'?u.leads:'',u.active?'Yes':'No']);
-  const mHead=['Manager','Product','Reports to','Team size','Team leads'];
+  const mHead=[roleLabel('lead'),'Product','Reports to','Team size','Team leads'];
   const mBody=(ts.managers||[]).map(m=>[m.name,m.team==='-'?'':teamName(m.team),m.superName||'',m.teamSize,m.teamLeads]);
-  const sHead=['Super Manager','Managers','Agents','Leads'];
+  const sHead=[roleLabel('super'),roleLabel('lead')+'s','Agents','Leads'];
   const sBody=(ts.supers||[]).map(x=>[x.name,x.managerCount,x.teamSize,x.teamLeads]);
-  const sheets=[{name:'All users',rows:[head,...body]},{name:'Manager wise',rows:[mHead,...mBody]}];
-  if(sBody.length) sheets.push({name:'Super Manager wise',rows:[sHead,...sBody]});
+  const sheets=[{name:'All users',rows:[head,...body]},{name:roleLabel('lead')+' wise',rows:[mHead,...mBody]}];
+  if(sBody.length) sheets.push({name:roleLabel('super')+' wise',rows:[sHead,...sBody]});
   downloadXLSX('team-structure-'+todayStr()+'.xlsx',sheets);
 }
 function doExport(kind,fmt){ const r=buildReportExport(kind); if(!r)return;
@@ -565,7 +624,7 @@ function renderShell(inner){
   const nav=navItems();
   const top=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}">${n[1]}</a>`).join('');
   const bot=nav.map(n=>`<a data-nav="${n[0]}" class="${state.route===n[0]?'active':''}"><span class="bi">${n[2]}</span>${n[1]}</a>`).join('');
-  // Item 9 — only Admin / Super Manager / Manager ever see Add Lead
+  // Item 9 — only Admin / Manager / TL ever see Add Lead
   const addBtn=canAddLead()?`<button class="btn add-lead-top" data-action="addlead">+ Add Lead</button>`:'';
   /* Item 11 — if the device clock itself is wrong (not just its timezone),
      every "in 1 hour" reminder the POC sets would land at the wrong moment.
@@ -628,7 +687,7 @@ function todayCallCard(l){const over=isDue(l.next_followup_at||l.next_followup);
   return `<div class="lcard" data-lead="${l.id}">
     <div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)} • ${esc(l.product)}</div></div>${badge(l.status)}</div>
     <div class="row"><span class="meta ${over?'overdue':''}">⏰ ${fmtRemind(at)} <b>${untilText(at)}</b></span>${srcChip(l.source)}</div>
-    <div class="acts"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>
+    <div class="acts">${canCall()?`<button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>`:''}
       <button class="btn ghost" data-action="editreminder" data-lead="${l.id}">⏰ Reschedule</button>
       <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
 }
@@ -649,16 +708,17 @@ function remindersPanel(compact){
       <td><div class="lead-nm">${esc(x.name)}</div><div class="lead-sub">${esc(x.phone||'')}${x.product?' • '+teamCode(x.product):''}</div></td>
       <td>${badge(x.status)}</td>
       ${showOwner?`<td class="lead-sub">${esc(x.owner_name||'—')}</td>`:''}
-      <td><button class="btn sm" data-action="call" data-lead="${x.id}">📞 Call</button></td></tr>`).join('');
+      ${canCall()?`<td><button class="btn sm" data-action="call" data-lead="${x.id}">📞 Call</button></td>`:''}</tr>`).join('');
+  const nCols=3+(showOwner?1:0)+(canCall()?1:0);
   const sections=groups.map(g=>{ const r=rowsFor(g[0]); if(!r) return '';
-    return `<tr><td colspan="${showOwner?5:4}" style="background:var(--bg);font-weight:800;color:${g[2]};padding:8px 12px">${g[1]} (${(c[g[0]]||0)})</td></tr>${r}`;
+    return `<tr><td colspan="${nCols}" style="background:var(--bg);font-weight:800;color:${g[2]};padding:8px 12px">${g[1]} (${(c[g[0]]||0)})</td></tr>${r}`;
   }).join('');
-  const empty=`<tr><td colspan="${showOwner?5:4}" style="text-align:center;color:var(--muted);padding:26px">🎉 No reminders pending. Set one on every call so nothing slips.</td></tr>`;
+  const empty=`<tr><td colspan="${nCols}" style="text-align:center;color:var(--muted);padding:26px">🎉 No reminders pending. Set one on every call so nothing slips.</td></tr>`;
   return `<div class="panel" style="margin-bottom:16px;border:2px solid ${c.overdue?'#ffd0cf':'#e3e7ee'}">
     <div class="panel-h">⏰ My Reminders — who to call and when
       <span class="lead-sub" style="font-weight:400">${c.overdue||0} overdue • ${c.today||0} today • ${c.upcoming||0} upcoming</span></div>
     <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
-      <thead><tr><th>When</th><th>Client</th><th>Status</th>${showOwner?'<th>Owner</th>':''}<th></th></tr></thead>
+      <thead><tr><th>When</th><th>Client</th><th>Status</th>${showOwner?'<th>Owner</th>':''}${canCall()?'<th></th>':''}</tr></thead>
       <tbody>${sections||empty}</tbody></table></div></div></div>`;
 }
 function funnelHTML(funnel){
@@ -710,7 +770,7 @@ function renderDashboard(){
         <div class="panel"><div class="panel-h">My Funnel</div><div class="panel-b funnel">${funnelHTML(sm.funnel)}</div></div></div>`;
   }
 
-  // admin / super manager / manager
+  // admin / manager / TL
   const remPanel=remindersPanel(true);
   const activity=state.reports.activity||[];
   const offenders=activity.filter(a=>a.junk>=3).sort((a,b)=>b.junk-a.junk);
@@ -759,26 +819,25 @@ function renderDashboard(){
     ${cols.map(c=>`<th style="text-align:right">${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></div>`;
 
   const title=state.user.role==='lead'?'My Team — '+esc(state.user.name)
-            :state.user.role==='super'?'My Managers — '+esc(state.user.name)
+            :state.user.role==='super'?'My '+roleLabel('lead')+'s — '+esc(state.user.name)
             :'Admin Dashboard';
   const f=state.dashFilter;
   const srcOpt=srcList().map(s=>`<option value="${s}" ${f.source===s?'selected':''}>${s}</option>`).join('');
   const depOpt=(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.department===d?'selected':''}>${esc(d)}</option>`).join('');
   const empOpt=salesUsers().map(u=>`<option value="${u.id}" ${f.owner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
-  const teamOpt=Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${f.team===k?'selected':''}>${teamName(k)}</option>`).join('');
   const active=f.from||f.to||f.source||f.department||f.owner||f.team;
   const dateBar=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px">
     <span class="lead-sub" style="font-weight:700">📅 From</span><input type="date" id="dfrom" value="${esc(f.from)}">
     <span class="lead-sub" style="font-weight:700">To</span><input type="date" id="dto" value="${esc(f.to)}">
     <select id="dsource"><option value="">All Sources</option>${srcOpt}</select>
-    <select id="dteam"><option value="">All Teams</option>${teamOpt}</select>
+    ${multiSelect('dteam','All Teams',teamOptsList())}
     <select id="ddept"><option value="">All Departments</option>${depOpt}</select>
     <select id="downer"><option value="">All Employees</option>${empOpt}</select>
     <button class="btn sm" data-action="applydash">Apply Filter</button>${active?' <button class="btn ghost sm" data-action="cleardash">Clear</button>':''}</div>`;
-  /* Item 7 — a Manager's dashboard is their own data only. Say so plainly so
+  /* Item 7 — a TL's dashboard is their own data only. Say so plainly so
      nobody mistakes a smaller number for missing data.                      */
   const scopeNote=(state.user.role==='lead')?`<div class="lead-sub" style="margin-bottom:10px">Showing only your team's data — ${salesUsers().length} agent(s) reporting to you.</div>`
-    :(state.user.role==='super')?`<div class="lead-sub" style="margin-bottom:10px">Showing every Manager under you and their teams — ${((state.teamStructure||{}).managers||[]).length} manager(s), ${salesUsers().length} agent(s).</div>`:'';
+    :(state.user.role==='super')?`<div class="lead-sub" style="margin-bottom:10px">Showing every ${roleLabel('lead')} under you and their teams — ${((state.teamStructure||{}).managers||[]).length} ${roleLabel('lead')}(s), ${salesUsers().length} agent(s).</div>`:'';
   return `<div class="page-h"><h2>${title}</h2><span class="cnt">${fmtDateTime(istDateTimeStr(new Date()))} IST</span></div>${scopeNote}${dateBar}${junkAlert}${kpis}${remPanel}
     <div class="page-h" style="margin-top:6px"><h2 style="font-size:15px">🎯 Targets</h2></div>
     <div class="kpis">${teamCards}</div>${activityPanel}
@@ -837,7 +896,7 @@ function renderLeads(mineOnly){
     const cards=pageLs.map(l=>{const fu=l.next_followup?`⏰ ${fmtDate(l.next_followup)}${isOverdue(l.next_followup)?' (overdue)':isToday(l.next_followup)?' (today)':''}`:'';
     return `<div class="lcard" data-lead="${l.id}"><div class="top"><div style="display:flex;gap:8px;align-items:flex-start"><span data-action="pick"><input type="checkbox" class="lead-check" data-lead="${l.id}" ${selLeads[l.id]?'checked':''}></span><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)}</div></div></div>${badge(l.status)}</div>
       <div class="row">${srcChip(l.source)}<span class="meta">🗓️ ${fmtDateTime(l.created_at)}</span><span class="pill">${esc(l.product)}</span>${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}${fu?`<span class="meta ${isOverdue(l.next_followup)?'overdue':''}">${fu}</span>`:''}</div>
-      <div class="acts"><button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>
+      <div class="acts">${canCall()?`<button class="ico-btn ico-call" data-action="call" data-lead="${l.id}">📞</button>`:''}
         <button class="ico-btn ico-wa" data-action="wa" data-lead="${l.id}">🟢</button>
         <button class="ico-btn" style="background:#fdecea;color:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️</button>
         <button class="btn ghost" data-lead="${l.id}">Open →</button></div></div>`;}).join('');
@@ -871,7 +930,7 @@ function renderFollowups(){
   const showOwner=state.user.role!=='sales';
   const card=l=>`<div class="lcard" data-lead="${l.id}"><div class="top"><div><div class="nm">${esc(l.name)}</div><div class="meta">${esc(l.phone)} • ${esc(l.city)} • ${esc(l.product)}</div></div>${badge(l.status)}</div>
     <div class="row"><span class="meta ${isOverdue(l.next_followup)?'overdue':''}">⏰ ${fmtDate(l.next_followup)}</span>${srcChip(l.source)}${showOwner?`<span class="meta">👤 ${esc(l.owner_name)}</span>`:''}</div>
-    <div class="acts"><button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>
+    <div class="acts">${canCall()?`<button class="btn" data-action="call" data-lead="${l.id}">📞 Call</button>`:''}
       <button class="btn ghost" data-action="wa" data-lead="${l.id}">WhatsApp</button>
       <button class="btn ghost" data-lead="${l.id}">Open</button></div></div>`;
   const sec=(t,arr,c)=>arr.length?`<div class="page-h" style="margin-top:18px"><h2 style="font-size:16px;color:${c}">${t}</h2><span class="cnt">${arr.length}</span></div><div class="cards" style="display:flex">${arr.map(card).join('')}</div>`:'';
@@ -904,7 +963,8 @@ function renderUsers(){
   const match=u=>{
     if(q && !((u.name||'').toLowerCase().includes(q) || (u.email||'').toLowerCase().includes(q) || (u.phone||'').includes(q))) return false;
     if(f.role && u.role!==f.role) return false;
-    if(f.team && u.team!==f.team) return false;
+    const fTeams=msVals(f.team);
+    if(fTeams.length && !fTeams.includes(u.team)) return false;
     if(f.manager==='__none__'){ if(u.manager_id) return false; }
     else if(f.manager && u.manager_id!==f.manager) return false;
     if(f.dept && (u.department||'')!==f.dept) return false;
@@ -918,14 +978,14 @@ function renderUsers(){
   const filterBar=`<div class="filters" style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px">
     <input class="search" id="tf_q" placeholder="🔍 Name / email / phone…" value="${esc(f.q||'')}" style="min-width:190px">
     <select id="tf_role"><option value="">All roles</option>${['admin','super','lead','sales'].map(r=>`<option value="${r}" ${f.role===r?'selected':''}>${esc(roleLabel(r))}</option>`).join('')}</select>
-    <select id="tf_team"><option value="">All products</option>${Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${f.team===k?'selected':''}>${teamName(k)}</option>`).join('')}</select>
-    <select id="tf_manager"><option value="">All managers</option>${mgrsForFilter.map(m=>`<option value="${m.id}" ${f.manager===m.id?'selected':''}>${esc(m.name)}</option>`).join('')}<option value="__none__" ${f.manager==='__none__'?'selected':''}>— no manager —</option></select>
+    ${multiSelect('tf_team','All products',teamOptsList())}
+    <select id="tf_manager"><option value="">All ${roleLabel('lead')}s</option>${mgrsForFilter.map(m=>`<option value="${m.id}" ${f.manager===m.id?'selected':''}>${esc(m.name)}</option>`).join('')}<option value="__none__" ${f.manager==='__none__'?'selected':''}>— no ${roleLabel('lead')} —</option></select>
     <select id="tf_dept"><option value="">All departments</option>${(CFG().departments||[]).map(d=>`<option value="${esc(d)}" ${f.dept===d?'selected':''}>${esc(d)}</option>`).join('')}</select>
     <select id="tf_status"><option value="">Active + inactive</option><option value="active" ${f.status==='active'?'selected':''}>Active only</option><option value="inactive" ${f.status==='inactive'?'selected':''}>Inactive only</option></select>
     ${anyFilter?'<button class="btn ghost sm" data-action="clearteamfilter">✕ Clear filters</button>':''}
     <div class="spacer"></div>
     <button class="btn ghost sm" data-action="dl-team">⬇ Excel</button>
-    <button class="btn ghost sm ${state.teamView==='flat'?'':'ghost'}" data-action="teamview" data-view="${state.teamView==='flat'?'tree':'flat'}">${state.teamView==='flat'?'🌳 Manager-wise view':'📋 Flat list'}</button>
+    <button class="btn ghost sm ${state.teamView==='flat'?'':'ghost'}" data-action="teamview" data-view="${state.teamView==='flat'?'tree':'flat'}">${state.teamView==='flat'?'🌳 '+roleLabel('lead')+'-wise view':'📋 Flat list'}</button>
   </div>`;
 
   const actionBtns=u=>isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${u.id}">Edit</button>
@@ -946,7 +1006,7 @@ function renderUsers(){
     const members=(m.members||[]).filter(match);
     if(anyFilter && !members.length && !match(m)) return '';
     const rows=members.map(u=>memberRow(u,18)).join('')
-      ||`<tr><td colspan="${isAdmin?7:6}" style="color:var(--muted);padding:14px 18px">No sales agent assigned to this manager yet.${isAdmin?' Use <b>Edit</b> on an agent and set “Reports to”.':''}</td></tr>`;
+      ||`<tr><td colspan="${isAdmin?7:6}" style="color:var(--muted);padding:14px 18px">No sales agent assigned to this ${roleLabel('lead')} yet.${isAdmin?' Use <b>Edit</b> on an agent and set “Reports to”.':''}</td></tr>`;
     return `<div class="panel" style="margin-bottom:14px">
       <div class="panel-h"><div style="display:flex;align-items:center;gap:10px">
         <div class="avatar">${initials(m.name)}</div>
@@ -970,7 +1030,7 @@ function renderUsers(){
         <div class="avatar" style="background:#7c5cff">${initials(sp.name)}</div>
         <div><div style="font-weight:800">${esc(sp.name)} ${roleB('super')}</div><div class="lead-sub">${esc(sp.email||'')}</div></div></div>
         <div style="display:flex;gap:14px;align-items:center">
-          <div style="text-align:right"><div class="lead-sub">Managers</div><div style="font-weight:800;font-size:18px">${sp.managerCount}</div></div>
+          <div style="text-align:right"><div class="lead-sub">${roleLabel('lead')}s</div><div style="font-weight:800;font-size:18px">${sp.managerCount}</div></div>
           <div style="text-align:right"><div class="lead-sub">Agents</div><div style="font-weight:800;font-size:18px">${sp.teamSize}</div></div>
           <div style="text-align:right"><div class="lead-sub">Leads</div><div style="font-weight:800;font-size:18px">${sp.teamLeads}</div></div>
           ${isAdmin?`<button class="btn ghost sm" data-action="edituser" data-uid="${sp.id}">Edit</button>`:''}
@@ -979,12 +1039,12 @@ function renderUsers(){
           <div class="avatar">${initials(m.name)}</div><div style="flex:1"><div class="lead-nm">${esc(m.name)}</div>
           <div class="lead-sub">${m.teamSize} agent(s) • ${m.teamLeads} leads</div></div>
           ${isAdmin?`<button class="btn ghost sm" data-action="managemembers" data-uid="${m.id}">👥 Manage</button>`:''}</div>`).join('')
-        :`<div class="lead-sub" style="padding:10px 0">No manager assigned under this Super Manager yet.${isAdmin?' Edit a Manager and set “Reports to”.':''}</div>`}</div></div>`;
+        :`<div class="lead-sub" style="padding:10px 0">No ${roleLabel('lead')} assigned under this ${roleLabel('super')} yet.${isAdmin?' Edit a '+roleLabel('lead')+' and set “Reports to”.':''}</div>`}</div></div>`;
   };
 
   const unassigned=(ts.unassigned||[]).filter(match);
   const orphanPanel=unassigned.length?`<div class="panel" style="margin-bottom:14px;border:2px solid #ffd8a8">
-    <div class="panel-h" style="color:#c77700">⚠️ Not under any manager — ${unassigned.length} agent(s)
+    <div class="panel-h" style="color:#c77700">⚠️ Not under any ${roleLabel('lead')} — ${unassigned.length} agent(s)
       <span class="lead-sub" style="font-weight:400">their leads roll up to Admin only</span></div>
     <div class="panel-b" style="padding:0"><div style="overflow-x:auto"><table>
       <thead><tr><th>Member</th><th>Role</th><th>Product</th><th>Department</th><th>Reports to</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
@@ -994,7 +1054,7 @@ function renderUsers(){
     ${(ts.managers||[]).filter(m=>!(ts.supers||[]).some(sp=>sp.id===m.manager_id)).map(mgrCard).join('')}
     ${(ts.supers||[]).length?(ts.managers||[]).filter(m=>(ts.supers||[]).some(sp=>sp.id===m.manager_id)).map(mgrCard).join(''):''}
     ${orphanPanel}
-    ${!(ts.managers||[]).length&&!(ts.supers||[]).length?'<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">No managers yet. Add a user with the role <b>Manager</b>, then assign agents to them.</div></div>':''}`;
+    ${!(ts.managers||[]).length&&!(ts.supers||[]).length?`<div class="panel"><div class="panel-b" style="text-align:center;color:var(--muted);padding:30px">No ${roleLabel('lead')}s yet. Add a user with the role <b>${roleLabel('lead')}</b>, then assign agents to them.</div></div>`:''}`;
 
   const flatView=`<div class="table-wrap"><table>
     <thead><tr><th>User</th><th>Role</th><th>Product</th><th>Department</th><th>Reports to</th><th style="text-align:right">Leads</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
@@ -1003,10 +1063,10 @@ function renderUsers(){
   const cards=people.map(u=>`<div class="lcard"><div class="top"><div style="display:flex;align-items:center;gap:10px">
     <div class="avatar">${initials(u.name)}</div><div><div class="nm" style="font-size:14px">${esc(u.name)}</div>
     <div class="meta">${u.team==='-'?'':teamCode(u.team)} • ${esc(u.email||'no email yet')}</div>
-    <div class="meta">${u.manager_id?'↳ '+esc(mgrName(u.manager_id)):'↳ no manager'}${u.role==='sales'?' • '+u.leads+' leads':''}</div></div></div>${roleB(u.role)}</div>
+    <div class="meta">${u.manager_id?'↳ '+esc(mgrName(u.manager_id)):'↳ no '+roleLabel('lead')}${u.role==='sales'?' • '+u.leads+' leads':''}</div></div></div>${roleB(u.role)}</div>
     ${isAdmin?`<div class="acts" style="margin-top:10px;flex-wrap:wrap">${actionBtns(u)}</div>`:''}</div>`).join('');
 
-  const counts=`${(ts.supers||[]).length} super manager(s) • ${(ts.managers||[]).length} manager(s) • ${(ts.all||[]).filter(u=>u.role==='sales').length} sales`;
+  const counts=`${(ts.supers||[]).length} ${roleLabel('super')}(s) • ${(ts.managers||[]).length} ${roleLabel('lead')}(s) • ${(ts.all||[]).filter(u=>u.role==='sales').length} sales`;
   return `<div class="page-h"><h2>Team</h2><span class="cnt">${counts}</span><div class="spacer"></div>
     ${isAdmin?'<button class="btn" data-action="adduser">+ Add User</button>':''}</div>
     ${filterBar}
@@ -1014,7 +1074,7 @@ function renderUsers(){
     <div class="cards">${cards}</div>`;
 }
 
-/* Item 6 — move sales agents in and out of a manager's team in one place */
+/* Item 6 — move sales agents in and out of a TL's team in one place */
 function manageMembersModal(mid){
   const ts=state.teamStructure||{};
   const m=(ts.all||[]).find(x=>x.id===mid); if(!m) return;
@@ -1096,7 +1156,7 @@ function renderSettings(){
 /* ---------------- BULK IMPORT (Excel/CSV) ---------------- */
 let IMPORT_ROWS=[], IMPORT_MAP={}, IMPORT_HEADERS=[], IMPORT_BAD=[], IMPORT_PRODUCT_MISSES={};
 function importModal(){
-  if(!canImport()){ alert('Only Admin and Team Lead can upload leads.'); return; }
+  if(!canImport()){ alert('Only Admin and '+roleLabel('lead')+' can upload leads.'); return; }
   IMPORT_ROWS=[]; IMPORT_MAP={}; IMPORT_HEADERS=[]; IMPORT_BAD=[]; IMPORT_PRODUCT_MISSES={};
   const teams=CFG().teams||{};
   const prOpt=Object.keys(teams).map(c=>`<option value="${c}">${c} — ${esc(teams[c].name||c)}</option>`).join('');
@@ -1370,16 +1430,18 @@ function renderReports(){
       <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">Recent deletions</b><table><thead><tr><th>Lead</th><th>Phone</th><th>Deleted by</th><th>When</th></tr></thead><tbody>${delRec||'<tr><td colspan="4" class="lead-sub">—</td></tr>'}</tbody></table></div></div></div>`;
 
   const ul=state.reports.usersList||{counts:{total:0,admin:0,lead:0,sales:0},byDept:[],users:[]};
-  const rB=r=>r==='admin'?'<span class="badge b-won">Admin</span>':r==='lead'?'<span class="badge b-follow">Team Lead</span>':'<span class="badge b-fresh">Sales</span>';
+  const rB=r=>{const cls=r==='admin'?'b-won':r==='super'?'b-interested':r==='lead'?'b-follow':'b-fresh';
+    return `<span class="badge ${cls}">${esc(roleLabel(r))}</span>`;};
   const uRows=ul.users.slice().sort(byDeptThenName).map(u=>`<tr><td>${esc(u.name)} <span class="lead-sub">${esc(u.email||'')}</span></td><td>${rB(u.role)}</td><td>${esc(u.department||'—')}</td><td>${u.team==='-'?'—':teamName(u.team)}</td></tr>`).join('');
-  const uDept=ul.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num">${d.admin}</td><td class="num">${d.lead}</td><td class="num">${d.sales}</td><td class="num" style="font-weight:700">${d.total}</td></tr>`).join('');
+  const uDept=ul.byDept.map(d=>`<tr><td>${esc(d.department)}</td><td class="num">${d.admin||0}</td><td class="num">${d.super||0}</td><td class="num">${d.lead||0}</td><td class="num">${d.sales||0}</td><td class="num" style="font-weight:700">${d.total}</td></tr>`).join('');
   const usersPanel=`<div class="panel"><div class="panel-h">👥 User List<span>${dlButtons('users')}</span></div>
     <div class="panel-b"><div class="kpis" style="margin-bottom:12px">
       <div class="kpi"><div class="lbl">Total Users</div><div class="val b">${ul.counts.total}</div></div>
       <div class="kpi"><div class="lbl">Admins</div><div class="val">${ul.counts.admin}</div></div>
-      <div class="kpi"><div class="lbl">Team Leads</div><div class="val">${ul.counts.lead}</div></div>
+      <div class="kpi"><div class="lbl">${roleLabel('super')}s</div><div class="val">${ul.counts.super||0}</div></div>
+      <div class="kpi"><div class="lbl">${roleLabel('lead')}s</div><div class="val">${ul.counts.lead||0}</div></div>
       <div class="kpi"><div class="lbl">Sales</div><div class="val g">${ul.counts.sales}</div></div></div>
-      <div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Admin</th><th style="text-align:right">TL</th><th style="text-align:right">Sales</th><th style="text-align:right">Total</th></tr></thead><tbody>${uDept}</tbody></table></div>
+      <div style="overflow-x:auto"><b class="lead-sub">Department wise</b><table><thead><tr><th>Department</th><th style="text-align:right">Admin</th><th style="text-align:right">${roleLabel('super')}</th><th style="text-align:right">${roleLabel('lead')}</th><th style="text-align:right">Sales</th><th style="text-align:right">Total</th></tr></thead><tbody>${uDept}</tbody></table></div>
       <div style="overflow-x:auto;margin-top:12px"><b class="lead-sub">All users (combined)</b><table><thead><tr><th>User</th><th>Role</th><th>Department</th><th>Team/Product</th></tr></thead><tbody>${uRows}</tbody></table></div></div></div>`;
 
   // Daily Report (LSQ-style) — per agent calls + pipeline + overdue, with a Total row
@@ -1388,22 +1450,37 @@ function renderReports(){
   const durS=s=>s?fmtDur(s):'0s';
   const T={calls:0,connected:0,duration:0,totalOpp:0,fresh:0,rnr:0,followup:0,interested:0,notInterested:0,won:0,overdue:0};
   let dBody='',dLastTeam='';
+  /* Every row and every number opens the leads behind it. The row itself drills
+     to that agent's whole pipeline; a status cell drills to that agent + that
+     status; the team header drills to the whole product. A zero is not clickable
+     (there is nothing to show) and stays grey.                               */
+  const dCell=(v,owner,extra,style)=>{
+    const num=+v||0;
+    const drill=num?`data-drill data-fowner="${owner}" ${extra||''} style="cursor:pointer;color:var(--blue);font-weight:700${style||''}"`:`style="color:#c4c9d4${style||''}"`;
+    return `<td class="num" ${drill}>${v}</td>`;};
   drRows.forEach(r=>{ Object.keys(T).forEach(k=>T[k]+=(r[k]||0));
-    const teamHdr=r.team!==dLastTeam?`<tr style="background:#fafbff"><td colspan="13" class="grp-td" style="padding:8px 14px">${teamName(r.team)}</td></tr>`:''; dLastTeam=r.team;
-    dBody+=teamHdr+`<tr><td><div class="lead-nm">${esc(r.name)}</div><div class="lead-sub">${esc(r.email||'')}</div></td>
+    const teamHdr=r.team!==dLastTeam?`<tr style="background:#fafbff" data-drill data-fproduct="${r.team}"><td colspan="13" class="grp-td" style="padding:8px 14px;cursor:pointer">${teamName(r.team)} <span class="lead-sub" style="font-weight:400">— open all leads of this product</span></td></tr>`:''; dLastTeam=r.team;
+    dBody+=teamHdr+`<tr data-drill data-fowner="${r.id}" style="cursor:pointer" title="Open ${esc(r.name)}'s leads">
+      <td><div class="lead-nm" style="color:var(--blue)">${esc(r.name)}</div><div class="lead-sub">${esc(r.email||'')}</div></td>
       <td class="num">${r.calls}</td><td class="num">${r.connected}</td><td class="num">${durS(r.duration)}</td><td class="num">${durS(r.avg)}</td>
-      <td class="num" style="font-weight:700">${r.totalOpp}</td><td class="num">${r.fresh}</td><td class="num">${r.rnr||0}</td><td class="num">${r.followup}</td><td class="num">${r.interested}</td>
-      <td class="num">${r.notInterested}</td><td class="num">${r.won}</td><td class="num ${r.overdue>0?'overdue':''}">${r.overdue}</td></tr>`;});
+      ${dCell(r.totalOpp,r.id,'','')}
+      ${dCell(r.fresh,r.id,'data-fstatus="Fresh"')}
+      ${dCell(r.rnr||0,r.id,'data-fstatus="RNR"')}
+      ${dCell(r.followup,r.id,'data-fstatus="Follow Up"')}
+      ${dCell(r.interested,r.id,'data-fstatus="Interested"')}
+      ${dCell(r.notInterested,r.id,'data-fstatus="Not Interested"')}
+      ${dCell(r.won,r.id,'data-fstatus="Closed Won"')}
+      ${dCell(r.overdue,r.id,'data-foverdue="1"',';color:var(--red)')}</tr>`;});
   const totalRow=`<tr style="background:#fff3e0;font-weight:800"><td>TOTAL</td><td class="num">${T.calls}</td><td class="num">${T.connected}</td><td class="num">${durS(T.duration)}</td><td class="num">—</td><td class="num">${T.totalOpp}</td><td class="num">${T.fresh}</td><td class="num">${T.rnr}</td><td class="num">${T.followup}</td><td class="num">${T.interested}</td><td class="num">${T.notInterested}</td><td class="num">${T.won}</td><td class="num">${T.overdue}</td></tr>`;
   const dFrom=state.dailyFrom||dr.from||todayStr(), dTo=state.dailyTo||dr.to||todayStr();
-  const agentOpts='<option value="">All agents</option>'+salesUsers().filter(u=>!state.dailyTeam||u.team===state.dailyTeam).map(u=>`<option value="${u.id}" ${state.dailyOwner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
-  const teamOpts='<option value="">All teams</option>'+Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${state.dailyTeam===k?'selected':''}>${teamName(k)}</option>`).join('');
+  const dTeams=msVals(state.dailyTeam);
+  const agentOpts='<option value="">All agents</option>'+salesUsers().filter(u=>!dTeams.length||dTeams.includes(u.team)).map(u=>`<option value="${u.id}" ${state.dailyOwner===u.id?'selected':''}>${esc(u.name)}</option>`).join('');
   const dRangeLbl=dFrom===dTo?esc(dFrom):esc(dFrom)+' → '+esc(dTo);
-  const dailyPanel=`<div class="panel"><div class="panel-h" style="flex-wrap:wrap;gap:8px"><div>📅 Daily Report — <b>${dRangeLbl}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue)</span></div>
+  const dailyPanel=`<div class="panel"><div class="panel-h" style="flex-wrap:wrap;gap:8px"><div>📅 Daily Report — <b>${dRangeLbl}</b> <span class="lead-sub" style="font-weight:400">per agent (calls + pipeline + overdue) • click any row or number → those leads open</span></div>
     <span style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
       <label class="lead-sub">From</label><input type="date" id="dailyFrom" value="${esc(dFrom)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
       <label class="lead-sub">To</label><input type="date" id="dailyTo" value="${esc(dTo)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">
-      <select id="dailyTeam" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${teamOpts}</select>
+      ${multiSelect('dailyTeam','All teams',teamOptsList())}
       <select id="dailyOwner" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px">${agentOpts}</select>
       <button class="btn sm" data-action="dailyrange">Apply</button> ${dl2('dl-daily')}</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Owner name</th><th style="text-align:right"># Calls</th><th style="text-align:right"># Connected</th><th style="text-align:right">Total Duration</th><th style="text-align:right">Avg Duration</th><th style="text-align:right">Total Opp</th><th style="text-align:right">Fresh</th><th style="text-align:right">RNR</th><th style="text-align:right">Follow Up</th><th style="text-align:right">Interested</th><th style="text-align:right">Not Interested</th><th style="text-align:right">Won</th><th style="text-align:right">Overdue Tasks</th></tr></thead>
@@ -1612,8 +1689,8 @@ function renderLeadDetail(){
         <span class="badge" style="background:${tier.c}20;color:${tier.c}">${tier.t} • score ${l.score}</span>${wonBadge}</div></div></div>
     <div class="ld-contact"><span>📞 <b>${esc(l.phone)}</b></span><span>✉️ <b>${esc(l.email)}</b></span><span>📍 <b>${esc(l.city)}</b></span>
       <span>🌐 <b>${esc(l.website||'—')}</b></span><span>👤 Owner: <b>${esc(l.owner_name)}</b></span><span>🗓️ Created: <b>${fmtDate(l.created_at)}</b></span></div>
-    <div class="ld-actions"><button class="btn" data-action="callnow" data-lead="${l.id}">📞 Call now</button>
-      <button class="btn ghost" data-action="miss" data-lead="${l.id}">📵 No answer (auto WA + RNR)</button>
+    <div class="ld-actions">${canCall()?`<button class="btn" data-action="callnow" data-lead="${l.id}">📞 Call now</button>
+      <button class="btn ghost" data-action="miss" data-lead="${l.id}">📵 No answer (auto WA + RNR)</button>`:''}
       <button class="btn" style="background:#25d366" data-action="wa" data-lead="${l.id}">🟢 WhatsApp</button>
       <button class="btn" style="background:#ea4335" data-action="email" data-lead="${l.id}" data-mail="${esc(l.email)}">✉️ Email</button>
       <button class="btn ghost" style="color:var(--red);border-color:#ffd0cf" data-action="deletelead" data-lead="${l.id}">🗑️ Delete</button></div></div>
@@ -1636,7 +1713,7 @@ function openModal(html){const bg=document.createElement('div');bg.className='mo
 function closeModal(){const m=document.getElementById('modalBg');if(m)m.remove();}
 
 function addLeadModal(){
-  if(!canAddLead()){ alert('Only Admin and Managers can add leads.'); return; }
+  if(!canAddLead()){ alert('Only Admin, '+roleLabel('super')+' and '+roleLabel('lead')+' can add leads.'); return; }
   const products=Object.keys(CFG().teams);
   const firstProduct=products[0]||'';
   // Item 3 — owner list is filtered to the selected product from the very first paint
@@ -1671,8 +1748,8 @@ function addUserModal(){
       <div class="field"><label>Name <span style="color:var(--red)">*</span></label><input id="nu_name" placeholder="e.g. User 1"></div>
       <div class="field"><label>Email (login id) <span style="color:var(--red)">*</span></label><input id="nu_email" type="email" placeholder="person@myhaulstore.com"></div>
       <div class="field"><label>Phone <span class="lead-sub">(optional)</span></label><input id="nu_phone" placeholder="+91 …"></div>
-      <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">Manager</option><option value="super">Super Manager</option><option value="admin">Admin</option></select></div>
-      <div class="field"><label>Reports to <span class="lead-sub">(Sales → a Manager; Manager → a Super Manager)</span></label>
+      <div class="field"><label>Role</label><select id="nu_role"><option value="sales">Sales</option><option value="lead">${roleLabel('lead')}</option><option value="super">${roleLabel('super')}</option><option value="admin">Admin</option></select></div>
+      <div class="field"><label>Reports to <span class="lead-sub">(Sales → a ${roleLabel('lead')}; ${roleLabel('lead')} → a ${roleLabel('super')})</span></label>
         <select id="nu_mgr"><option value="">— none —</option>${state.users.filter(x=>x.role==='lead'||x.role==='super').map(x=>`<option value="${x.id}">${esc(x.name)} (${esc(roleLabel(x.role))})</option>`).join('')}</select></div>
       <div class="field"><label>Team / Product</label><select id="nu_team">${teamOpt}</select></div>
       <div class="field"><label>Department</label><input id="nu_dept" placeholder="e.g. Pre Sales / TFD Sales"></div>
@@ -1682,8 +1759,8 @@ function addUserModal(){
 function editUserModal(uid){
   const u=state.users.find(x=>x.id===uid); if(!u)return;
   const teamOpt=Object.keys(CFG().teams).map(k=>`<option value="${k}" ${u.team===k?'selected':''}>${teamName(k)}</option>`).join('');
-  const roleOpt=[['sales','Sales'],['lead','Manager'],['super','Super Manager'],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${r[1]}</option>`).join('');
-  /* a Sales agent reports to a Manager; a Manager reports to a Super Manager */
+  const roleOpt=[['sales','Sales'],['lead',roleLabel('lead')],['super',roleLabel('super')],['admin','Admin']].map(r=>`<option value="${r[0]}" ${u.role===r[0]?'selected':''}>${esc(r[1])}</option>`).join('');
+  /* a Sales agent reports to a TL; a TL reports to a Manager */
   const tls=state.users.filter(x=>x.id!==u.id && (u.role==='lead'?x.role==='super':(x.role==='lead'||x.role==='super')));
   const mgrOpt='<option value="">— No manager —</option>'+tls.map(x=>`<option value="${x.id}" ${u.manager_id===x.id?'selected':''}>${esc(x.name)} (${esc(roleLabel(x.role))}${x.team&&x.team!=='-'?' • '+teamCode(x.team):''})</option>`).join('');
   openModal(`<div class="modal"><div class="modal-h"><h3>Edit User</h3><span class="x" data-action="closemodal">×</span></div>
@@ -1843,6 +1920,12 @@ const gv=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
 function findLeadLocal(id){ if(state.currentLead&&state.currentLead.id===id)return state.currentLead; return (state.leads||[]).find(l=>l.id===id); }
 
 document.addEventListener('click',async function(e){
+  /* an open multi-select closes on any click outside it. If that click was on
+     something that renders anyway, close silently and let it do the render. */
+  if(state.msOpen && !e.target.closest('.ms')){
+    state.msOpen='';
+    if(!e.target.closest('[data-action],[data-nav],[data-drill],[data-drillowner],[data-lead],[data-uid],[data-tab]')) return render();
+  }
   const nav=e.target.closest('[data-nav]');
   if(nav){ const r=nav.dataset.nav; if(r==='back'){ return go(state.user.role==='sales'?'myleads':'leads'); } return go(r); }
 
@@ -1916,10 +1999,20 @@ document.addEventListener('click',async function(e){
     if(a==='dl-daily'){ return exportDaily(act.dataset.fmt); }
     if(a==='dailyrange'){ state.dailyFrom=gv('dailyFrom'); state.dailyTo=gv('dailyTo');
       state.dailyOwner=(document.getElementById('dailyOwner')||{}).value||'';
-      state.dailyTeam=(document.getElementById('dailyTeam')||{}).value||''; return refresh(); }
+      /* team is a multi-select — its ticks are already in state.dailyTeam */
+      state.msOpen=''; return refresh(); }
     if(a==='walogout'){ if(confirm('WhatsApp disconnect karke naya QR laayein?')){ await api('/api/whatsapp/logout','POST'); state.wa={available:true,connected:false,qr:null}; state.toastMsg='WhatsApp disconnected — naya QR aa raha hai'; return refresh(); } return; }
     if(a==='refreshnow'){ state.toastMsg='🔄 Refreshed'; return refresh(); }
     if(a==='dismissjunk'){ state.junkDismissed=true; return render(); }
+    /* ---------- multi-select filter ---------- */
+    if(a==='mstoggle'){ const id=act.dataset.ms; state.msOpen=(state.msOpen===id)?'':id; return render(); }
+    if(a==='msdone'){ state.msOpen=''; return render(); }
+    if(a==='msclear'){ const id=act.dataset.ms; const f=MS_FIELDS[id]; if(f) f.set([]);
+      if(id==='tf_team') return render();
+      return render(); }
+    if(a==='msall'){ const id=act.dataset.ms; const f=MS_FIELDS[id];
+      const all=[...document.querySelectorAll('.ms-box[data-ms="'+id+'"]')].map(b=>b.dataset.val);
+      if(f) f.set(all); return render(); }
     if(a==='pick'){ return; }
     if(a==='pageprev'){ state.leadPage=Math.max(1,(state.leadPage||1)-1); return render(); }
     if(a==='pagenext'){ state.leadPage=(state.leadPage||1)+1; return render(); }
@@ -1965,8 +2058,10 @@ document.addEventListener('click',async function(e){
     if(a==='savesettings'){ await api('/api/settings','PATCH',{target_leads:+gv('st_leads'),target_interested:+gv('st_int'),target_closed:+gv('st_closed')});
       const me=await api('/api/me'); setCfg(me.config); state.toastMsg='Targets saved ✓'; return refresh(); }
     if(a==='applydash'){ const val=id=>{const e=document.getElementById(id);return e?e.value:'';};
-      state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer'),team:val('dteam')}; return refresh(); }
-    if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:'',team:''}; return refresh(); }
+      /* team is a multi-select: the ticks already live in state, not in a <select> */
+      state.dashFilter={from:val('dfrom'),to:val('dto'),source:val('dsource'),department:val('ddept'),owner:val('downer'),team:state.dashFilter.team||''};
+      state.msOpen=''; return refresh(); }
+    if(a==='cleardash'){ state.dashFilter={from:'',to:'',source:'',department:'',owner:'',team:''}; state.msOpen=''; return refresh(); }
     if(a==='email'){ const l=findLeadLocal(id); const mail=String((l&&l.email)||act.dataset.mail||''); if(mail.includes('@')){try{window.location.href='mailto:'+mail+'?subject='+encodeURIComponent('My Haul Store');}catch(_){}} await api('/api/leads/'+id+'/email','POST',{}); state.toastMsg='✉️ Opening email…'; return refresh(); }
     if(a==='clearfilters'){ state.filters={q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}; return refresh(); }
           if(a==='togtodayfresh'){ state.filters.todayfresh=state.filters.todayfresh?'':'1'; return refresh(); }
@@ -1992,7 +2087,7 @@ document.addEventListener('click',async function(e){
       closeModal(); state.toastMsg=name+' added — login: '+email+' / '+(pwd||'123456'); if(state.route==='users') return refresh(); return; }
     if(a==='toggleconn'){ await api('/api/connectors/'+act.dataset.ckey,'PATCH',{connected:+act.dataset.val}); state.toastMsg='Connector updated'; return refresh(); }
     if(a==='toggleauto'){ await api('/api/automation','PATCH',{key:act.dataset.akey,enabled:+act.dataset.val}); state.toastMsg='Automation updated'; return refresh(); }
-    if(a==='callnow'||a==='call'){ return callFlowModal(id); }
+    if(a==='callnow'||a==='call'){ if(!canCall()){ alert('Calling is for the sales POC. Manager and TL can see the call log in Call History and Reports.'); return; } return callFlowModal(id); }
     if(a==='editreminder'){ return editReminderModal(id); }
     if(a==='calltimer'){ if(CALL.timer) callStop(); else callStart(); return; }
     if(a==='dialnow'){ callStart(); return; }   // dialing starts the clock; the tel: link still opens
@@ -2047,6 +2142,11 @@ function updateRemHint(){ const box=document.getElementById('cl_rem'); const h=d
 
 document.addEventListener('change',async function(e){
   const el=e.target;
+  if(el.classList&&el.classList.contains('ms-box')){
+    const id=el.dataset.ms, v=el.dataset.val, f=MS_FIELDS[id];
+    if(f){ const cur=f.get(); f.set(el.checked?cur.concat([v]).filter((x,i,a)=>a.indexOf(x)===i):cur.filter(x=>x!==v)); }
+    return render();   // the popup stays open (state.msOpen is untouched)
+  }
   if(el.id==='cl_rem'){ return updateRemHint(); }
   /* Item 3 — the product picker drives the owner list */
   if(el.id==='nl_product'){ const ow=document.getElementById('nl_owner');
