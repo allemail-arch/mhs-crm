@@ -12,6 +12,7 @@ const PRODUCTS = Object.keys(TEAMS);
 
 // Lead sources (channels) — with colour + icon. Admin can add more from Settings.
 const DEFAULT_SOURCES = [
+  { name: 'Pre Sales',   color: '#00b8d9', icon: 'PS' },
   { name: 'Facebook',    color: '#1877f2', icon: 'f'  },
   { name: 'Google Ads',  color: '#34a853', icon: 'G'  },
   { name: 'Website',     color: '#ff6a00', icon: 'W'  },

@@ -169,8 +169,57 @@ try {
   for (const r of rows) { const n = String(r.phone || '').replace(/\D/g, '').slice(-10); if (n) upd.run(n, r.id); }
 } catch (e) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_leads_phonenorm ON leads(phone_norm)'); } catch (e) {}
-// manager_id: which Team Lead a sales agent reports to (for TL-scoped data)
+// manager_id: who this user reports to.
+//   sales → their Manager (role 'lead');  lead → their Super Manager (role 'super')
 try { db.exec('ALTER TABLE users ADD COLUMN manager_id TEXT'); } catch (e) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_users_manager ON users(manager_id)'); } catch (e) {}
+
+/* ---------- reminders with a TIME, not just a date ----------
+   Clients say "call me in 1 hour" / "call me after 2 days". A date-only
+   next_followup could not express the first one, so a second column holds
+   the full IST wall-clock 'YYYY-MM-DD HH:MM'. next_followup (date) stays in
+   place and is kept in sync, so every existing overdue/due-today query and
+   report keeps working untouched.                                          */
+try { db.exec('ALTER TABLE leads ADD COLUMN next_followup_at TEXT'); } catch (e) {}
+try {
+  db.prepare(`UPDATE leads SET next_followup_at = next_followup || ' 10:00'
+              WHERE next_followup IS NOT NULL AND next_followup <> ''
+                AND (next_followup_at IS NULL OR next_followup_at = '')`).run();
+} catch (e) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_leads_followup_at ON leads(next_followup_at)'); } catch (e) {}
+
+/* ---------- call log: disposition + note (in-CRM calling) ---------- */
+for (const col of ['outcome TEXT', 'notes TEXT', 'by_user TEXT', 'direction TEXT DEFAULT \'outbound\'', 'recording_url TEXT']) {
+  try { db.exec('ALTER TABLE calls ADD COLUMN ' + col); } catch (e) {}
+}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_calls_lead ON calls(lead_id)'); } catch (e) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_calls_created ON calls(created_at)'); } catch (e) {}
+
+/* ---------- lead assignment history (who gave which lead to whom, when) ---------- */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS lead_assignments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id       TEXT,
+    lead_name     TEXT,
+    phone         TEXT,
+    product       TEXT,
+    from_owner    TEXT,
+    from_name     TEXT,
+    to_owner      TEXT,
+    to_name       TEXT,
+    by_user       TEXT,
+    by_name       TEXT,
+    reason        TEXT,          -- manual | round-robin | import | bulk | transfer | webhook
+    created_at    TEXT DEFAULT (datetime('now','+330 minutes'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_assign_lead ON lead_assignments(lead_id);
+  CREATE INDEX IF NOT EXISTS idx_assign_to   ON lead_assignments(to_owner);
+  CREATE INDEX IF NOT EXISTS idx_assign_by   ON lead_assignments(by_user);
+  CREATE INDEX IF NOT EXISTS idx_assign_time ON lead_assignments(created_at);
+`);
+
+/* ---------- 'Pre Sales' lead source ---------- */
+try { db.prepare("INSERT OR IGNORE INTO sources(name,color,icon) VALUES('Pre Sales','#00b8d9','PS')").run(); } catch (e) {}
 
 /* ---------- login is now EMAIL + PASSWORD (the PIN keypad is gone) ---------- */
 for (const col of ['pwd_hash TEXT', 'pwd_salt TEXT', 'pwd_changed INTEGER DEFAULT 0']) {
