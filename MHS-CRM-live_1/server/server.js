@@ -63,14 +63,21 @@ function authUser(req) {
   return userById(p.uid);
 }
 
-/* who may bulk-upload leads (manager roles only — Sales never can) */
+/* who may bulk-upload leads (Admin / Manager / TL — Sales never can) */
 const IMPORT_ROLES = ['admin', 'super', 'lead'];
 /* who may create a lead at all. Sales agents work the leads they are given;
    they no longer see or reach the Add Lead action (UI hides it, this enforces it). */
 const ADD_LEAD_ROLES = ['admin', 'super', 'lead'];
 /* admin > super (Super Manager) > lead (Manager) > sales */
 const ROLES = ['admin', 'super', 'lead', 'sales'];
-const ROLE_LABEL = { admin: 'Admin', super: 'Super Manager', lead: 'Manager', sales: 'Sales' };
+/* Role labels (Aug 2026 rename): the role KEYS never change (admin/super/lead/sales)
+   so every stored row keeps working — only what people read changed:
+     super  was 'Super Manager'  ->  'Manager'
+     lead   was 'Manager'        ->  'TL'                                    */
+const ROLE_LABEL = { admin: 'Admin', super: 'Manager', lead: 'TL', sales: 'Sales' };
+/* who may place / log a call. The dialer belongs to the Sales POC; Manager and
+   TL read the call data in reports but never dial from the CRM. */
+const CALL_ROLES = ['admin', 'sales'];
 
 /* Resolve an Owner cell from an uploaded sheet to a real CRM user.
    Accepts the person's email or their exact name (case / spacing
@@ -368,6 +375,19 @@ function managerTree(user) {
   const unassigned = visible.filter(u => u.role === 'sales' && !visible.some(m => m.role === 'lead' && m.id === u.manager_id)).map(decorate);
   return { supers, managers, unassigned, all: visible.map(decorate) };
 }
+/* A filter value may now carry SEVERAL choices, comma separated ("TPA,TFD").
+   The UI sends one query param either way, so every old single-value link,
+   bookmark and export keeps working — one value is just a list of one.   */
+function listParam(v) {
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
+  return String(v == null ? '' : v).split(',').map(x => x.trim()).filter(Boolean);
+}
+/* keep only the sales agents whose team is in the (possibly multi) filter */
+function filterByTeams(sales, v) {
+  const t = listParam(v);
+  return t.length ? sales.filter(u => t.includes(u.team)) : sales;
+}
+
 // unified lead filter: role scope + date/source/department/employee
 function leadWhere(user, f) {
   f = f || {};
@@ -378,7 +398,11 @@ function leadWhere(user, f) {
   if (f.source) { where += " AND source=?"; args.push(f.source); }
   if (f.owner) { where += " AND owner_id=?"; args.push(f.owner); }
   if (f.department) { where += " AND owner_id IN (SELECT id FROM users WHERE department=?)"; args.push(f.department); }
-  if (f.team) { where += " AND owner_id IN (SELECT id FROM users WHERE team=?)"; args.push(f.team); }
+  const teams = listParam(f.team);
+  if (teams.length) {
+    where += ` AND owner_id IN (SELECT id FROM users WHERE team IN (${teams.map(() => '?').join(',')}))`;
+    args.push(...teams);
+  }
   return { where, args };
 }
 function getDepartments() {
@@ -410,7 +434,7 @@ function reportAgents(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
-  if (f.team) sales = sales.filter(u => u.team === f.team);
+  sales = filterByTeams(sales, f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const cols = ['Fresh', 'Follow Up', 'Interested', 'Not Interested', 'Closed Won'];
   return sales.map(u => {
@@ -427,7 +451,7 @@ function reportActivity(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
-  if (f.team) sales = sales.filter(u => u.team === f.team);
+  sales = filterByTeams(sales, f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   // connected calls today + talk time, per owner (from the calls table)
   const rows = db.prepare(`SELECT owner_id oid, COUNT(*) c, SUM(talktime) t FROM calls
@@ -454,7 +478,7 @@ function reportDaily(user, f) {
   const to = f.to || f.date || today;
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
-  if (f.team) sales = sales.filter(u => u.team === f.team);
+  sales = filterByTeams(sales, f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const rows = sales.map(u => {
@@ -481,7 +505,7 @@ function reportFollowups(user, f) {
   f = f || {};
   let sales = salesForUser(user);
   if (f.department) sales = sales.filter(u => u.department === f.department);
-  if (f.team) sales = sales.filter(u => u.team === f.team);
+  sales = filterByTeams(sales, f.team);
   if (f.owner) sales = sales.filter(u => u.id === f.owner);
   const OPEN = "('Fresh','RNR','Follow Up','Interested')";
   const per = sales.map(u => {
@@ -514,7 +538,7 @@ function reportLeadsDist(user, f) {
   const from = f.from || todayIst();
   const to = f.to || from;
   let sales = salesForUser(user);
-  if (f.team) sales = sales.filter(u => u.team === f.team);
+  sales = filterByTeams(sales, f.team);
   if (f.department) sales = sales.filter(u => u.department === f.department);
   const cols = cfg.STATUS_LIST;
   const per = sales.map(u => {
@@ -914,7 +938,7 @@ const server = http.createServer(async (req, res) => {
       }
       // bulk change product/team for selected leads (fixes leads imported into the wrong product)
       if (p === '/api/leads/bulk-product' && m === 'POST') {
-        if (user.role === 'sales') return err(res, 403, 'admin or team lead only');
+        if (user.role === 'sales') return err(res, 403, 'Admin, ' + ROLE_LABEL.super + ' or ' + ROLE_LABEL.lead + ' only');
         const b = await readBody(req);
         const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
         const product = b.product ? String(b.product).trim() : '';
@@ -978,7 +1002,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { leads: rows.map(r => leadJSON(r)) });
       }
       if (p === '/api/leads' && m === 'POST') {
-        if (!ADD_LEAD_ROLES.includes(user.role)) return err(res, 403, 'Only Admin and Managers can add leads');
+        if (!ADD_LEAD_ROLES.includes(user.role)) return err(res, 403, 'Only Admin, ' + ROLE_LABEL.super + ' and ' + ROLE_LABEL.lead + ' can add leads');
         const b = await readBody(req);
         if (!b.name) return err(res, 400, 'name required');
         if (normPhone(b.phone).length < 7) return err(res, 400, 'A valid phone number is required');
@@ -993,7 +1017,7 @@ const server = http.createServer(async (req, res) => {
       // Anything unresolvable is rejected and reported back, not defaulted.
       if (p === '/api/leads/bulk' && m === 'POST') {
         // uploading leads is a manager job: Admin + Team Lead only, never Sales
-        if (!IMPORT_ROLES.includes(user.role)) return err(res, 403, 'Only Admin and Team Lead can upload leads');
+        if (!IMPORT_ROLES.includes(user.role)) return err(res, 403, 'Only Admin, ' + ROLE_LABEL.super + ' and ' + ROLE_LABEL.lead + ' can upload leads');
         const b = await readBody(req);
         const list = Array.isArray(b.leads) ? b.leads : [];
         if (!list.length) return err(res, 400, 'no leads to import');
@@ -1108,6 +1132,10 @@ const server = http.createServer(async (req, res) => {
         const act = mm[2]; const b = await readBody(req);
         if (act === 'activity') { logAct(lead.id, b.title || '📝 Note', b.sub || '', user.name); }
         else if (act === 'call') {
+          // Only the Sales POC (and Admin) dials. A Manager or TL clicking this
+          // would log a call against an agent they only supervise, so the UI hides
+          // the button and this line makes the rule real.
+          if (!CALL_ROLES.includes(user.role)) return err(res, 403, 'Only the sales POC can log a call');
           // In-CRM calling: the browser/phone places the call, the CRM keeps the log.
           // The client sends the measured talk time, a disposition and an optional
           // note; status + reminder can be set in the same round trip so the POC
@@ -1129,7 +1157,9 @@ const server = http.createServer(async (req, res) => {
             await applyStatusChange(leadRow(lead.id), b.status, user.name);
           }
         }
-        else if (act === 'miss') { db.prepare(`INSERT INTO calls(lead_id,owner_id,connected,talktime,created_at) VALUES(?,?,0,0,${IST_NOW})`).run(lead.id, lead.owner_id); const steps = await handleMiss(lead, user.name); return send(res, 200, { ok: true, steps, lead: leadJSON(leadRow(lead.id), true) }); }
+        else if (act === 'miss') {
+          if (!CALL_ROLES.includes(user.role)) return err(res, 403, 'Only the sales POC can mark a missed call');
+          db.prepare(`INSERT INTO calls(lead_id,owner_id,connected,talktime,created_at) VALUES(?,?,0,0,${IST_NOW})`).run(lead.id, lead.owner_id); const steps = await handleMiss(lead, user.name); return send(res, 200, { ok: true, steps, lead: leadJSON(leadRow(lead.id), true) }); }
         else if (act === 'whatsapp') { const r = await sendWhatsApp(lead.phone, b.text || 'Hi ' + lead.name); logAct(lead.id, '🟢 WhatsApp ' + (r.sent ? 'sent' : 'opened (simulated)'), b.text || '', user.name); }
         else if (act === 'email') { const r = await sendEmail(lead.email, b.subject || 'From My Haul Store', b.text || ''); logAct(lead.id, '✉️ Email ' + (r.sent ? 'sent' : 'composed (simulated)'), b.subject || '', user.name); }
         return send(res, 200, { ok: true, lead: leadJSON(leadRow(lead.id), true) });
@@ -1249,6 +1279,7 @@ function publicConfig() {
   return { teams, products: Object.keys(teams), sources: getSources(), statuses: cfg.STATUS_LIST,
     departments: getDepartments(), teamTarget: at, agentTarget: at,
     whatsappProduct: presalesProduct(), importRoles: IMPORT_ROLES, addLeadRoles: ADD_LEAD_ROLES,
+    callRoles: CALL_ROLES,
     roles: ROLES, roleLabels: ROLE_LABEL,
     // the server clock in IST — the UI checks it against the device clock so a
     // wrongly-set laptop can never silently show the wrong dates/times
