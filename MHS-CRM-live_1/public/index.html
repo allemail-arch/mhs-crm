@@ -1185,6 +1185,19 @@ function renderConnectors(){
         <button class="btn ghost sm" data-action="addsource" data-team="${tk}">+ Source</button></div>
         ${conns?`<div class="lead-sub" style="margin-top:5px">also via connector: ${esc(conns)}</div>`:''}</td>
       <td class="lead-sub">${esc(ags)}</td></tr>`;}).join('');
+  /* The chips are quick, but "click a chip" is not a discoverable way to
+     reach edit/delete. This table spells all three actions out: change the
+     product inline, Edit for name/colour/icon, Delete to retire it. */
+  const srcManageRows=srcAll.map(sc=>`<tr>
+      <td><span class="src"><span class="si" style="background:${esc(sc.color||'#6b7488')}">${esc(sc.icon||'?')}</span>${esc(sc.name)}</span></td>
+      <td><select class="srcteam" data-sname="${esc(sc.name)}" style="padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:190px">${productOptions(sc.team||'','— not routed —')}</select></td>
+      <td style="white-space:nowrap"><button class="btn ghost sm" data-action="editsource" data-sname="${esc(sc.name)}">✎ Edit</button>
+        <button class="btn ghost sm" style="color:var(--red);border-color:#ffd0cf" data-action="deletesource" data-sname="${esc(sc.name)}">🗑️ Delete</button></td></tr>`).join('');
+  const sourcesPanel=`<div class="panel" style="margin-top:16px"><div class="panel-h">📥 Lead Sources — add, edit &amp; delete
+      <button class="btn sm" data-action="addsource">+ Add Source</button></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Source</th><th>Routes to (product / team)</th><th>Actions</th></tr></thead>
+      <tbody>${srcManageRows||'<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:22px">No source yet</td></tr>'}</tbody></table></div>
+    <div class="panel-b lead-sub" style="padding-top:8px">Changing the product here takes effect for <b>new</b> leads. <b>Edit</b> renames / recolours a source — a rename also renames it on every lead that already has it. <b>Delete</b> takes it out of every list; leads that already carry it keep their label and stay in the reports.</div></div>`;
   const unrouted=srcAll.filter(sc=>!sc.team||!CFG().teams[sc.team]);
   const unroutedRow=unrouted.length?`<tr style="background:#fff8ef">
       <td style="white-space:nowrap"><span class="pill" style="background:#ffe8cc;color:#c77700">—</span> Not routed</td>
@@ -1206,7 +1219,8 @@ function renderConnectors(){
         <button class="btn sm" data-action="addproduct">+ Add Product</button></span></div>
         <div style="overflow-x:auto"><table><thead><tr><th>Product / Team</th><th>Sources <span class="lead-sub" style="font-weight:400">— click a chip to edit / move / delete</span></th><th>Round-robin agents</th></tr></thead>
         <tbody>${routeRows}${unroutedRow}</tbody></table></div>
-        <div class="panel-b lead-sub" style="padding-top:8px">A new lead goes to the product of its source, and is round-robined among that product's agents. A source with no product falls back to its connector.</div></div></div>`;
+        <div class="panel-b lead-sub" style="padding-top:8px">A new lead goes to the product of its source, and is round-robined among that product's agents. A source with no product falls back to its connector.</div></div></div>
+    ${sourcesPanel}`;
 }
 
 /* ---------------- SETTINGS (Admin) ---------------- */
@@ -2179,6 +2193,7 @@ document.addEventListener('click',async function(e){
       if(r&&r.error){alert(r.error);return;}
       const me=await api('/api/me'); setCfg(me.config); closeModal();
       state.toastMsg=r.retired?'Source removed from the lists — '+r.leads+' existing lead(s) keep it':'Source deleted';
+      void 0;
       return refresh(); }
     if(a==='savewaprod'){ const wp=(document.getElementById('st_waprod')||{}).value||'';
       const r=await api('/api/settings','PATCH',{whatsapp_product:wp}); if(r.error){alert(r.error);return;}
@@ -2320,6 +2335,11 @@ document.addEventListener('change',async function(e){
     boxes.forEach(b=>{ b.checked=el.checked; if(el.checked) state.closedSel[b.dataset.lead]=1; else delete state.closedSel[b.dataset.lead]; });
     const c=document.getElementById('closedSelCount'); const n=Object.keys(state.closedSel).length;
     if(c) c.textContent=n?n+' marked':''; return; }
+  if(el.classList&&el.classList.contains('srcteam')){ const nm=el.dataset.sname;
+    const r=await api('/api/sources/'+encodeURIComponent(nm),'PATCH',{team:el.value||''});
+    if(r&&r.error){ alert(r.error); return refresh(); }
+    const me=await api('/api/me'); setCfg(me.config);
+    state.toastMsg=el.value?nm+' → '+teamCode(el.value):nm+' — routing cleared'; return refresh(); }
   if(el.id==='fstatus'){ state.filters.status=el.value; return refresh(); }
   if(el.id==='fsource'){ state.filters.source=el.value; return refresh(); }
   if(el.id==='fowner'){ state.filters.owner=el.value; return refresh(); }
