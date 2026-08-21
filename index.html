@@ -212,7 +212,7 @@ const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, log
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:'',team:''},
   searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25,
-  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0, msOpen:'',
+  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0, msOpen:'', drillFrom:null,
   teamFilter:{q:'',role:'',team:'',manager:'',dept:'',status:''},
   closedFilter:{from:'',to:'',type:''}, assignFilter:{from:'',to:'',owner:'',by:'',reason:'',q:''}, closedSel:{} };
 
@@ -493,6 +493,20 @@ function exportCallingReport(fmt){ const act=state.reports.activity||[]; if(!act
   else downloadXLSX(name+'.xlsx',[{name:'Calling Activity',rows:[head,...body]}]); }
 
 /* ---------------- API ---------------- */
+/* ============================================================
+   SESSION THAT SURVIVES A RELOAD  (item 1)
+   The JWT used to live only in memory, so an F5 — or a phone putting the
+   tab to sleep — logged the person out in the middle of a call. It is now
+   kept in localStorage next to the screen they were on. Nothing sensitive
+   beyond the token is stored, the token is short-lived, and the server
+   re-verifies it on every single call: a stale or revoked one is cleared
+   the first time an API call comes back 401.
+   ============================================================ */
+const SESS_KEY='mhs_session_v1';
+function saveSession(){ try{ localStorage.setItem(SESS_KEY,JSON.stringify({token:state.token,route:state.route,params:state.params})); }catch(_){} }
+function clearSession(){ try{ localStorage.removeItem(SESS_KEY); }catch(_){} }
+function readSession(){ try{ return JSON.parse(localStorage.getItem(SESS_KEY)||'null'); }catch(_){ return null; } }
+
 async function api(path,method='GET',body){
   const opt={method,headers:{}};
   if(state.token) opt.headers['Authorization']='Bearer '+state.token;
@@ -558,7 +572,10 @@ async function loadRouteData(){
     state.currentLead=(await api('/api/leads/'+state.params.id)).lead;
   }
 }
-async function go(route,params){ state.route=route; state.params=params||{}; window.scrollTo(0,0);
+async function go(route,params){
+  /* leaving the leads screen ends the "came from a report" trail (item 3) */
+  if(!['leads','myleads','lead'].includes(route)) state.drillFrom=null;
+  state.route=route; state.params=params||{}; window.scrollTo(0,0); saveSession();
   try{ await loadRouteData(); }catch(e){ return; } render(); }
 async function refresh(){ try{ await loadRouteData(); }catch(e){ return; } render(); }
 
@@ -573,15 +590,42 @@ async function doLogin(email,password){
   /* Item 11 — compare this device's clock with the server's IST clock */
   try{ const sv=parseD(me.config.serverNow); if(sv) state.clockSkew=Math.round((Date.now()-sv.getTime())/60000); }catch(_){ state.clockSkew=0; }
   try{ state.users=(await api('/api/users')).users; }catch(_){ state.users=[]; }
-  state.route='dashboard'; state.loginErr='';
+  state.route='dashboard'; state.loginErr=''; saveSession();
   await loadRouteData(); render();
 }
-function logout(){ state.token=null; state.user=null; state.route='dashboard'; render(); }
+function logout(){ clearSession(); state.token=null; state.user=null; state.route='dashboard'; state.drillFrom=null; render(); }
+
+/* Restore the signed-in session on page load. Anything unexpected — no
+   stored token, an expired one, a route that no longer exists for this
+   role — falls back to the login screen or the dashboard instead of
+   leaving a half-loaded page. */
+async function boot(){
+  const sv=readSession();
+  if(!sv||!sv.token) return render();
+  state.token=sv.token;
+  let me=null; try{ me=await api('/api/me'); }catch(_){}
+  if(!me||me.error||!me.user){ state.token=null; clearSession(); return render(); }
+  state.user=me.user; setCfg(me.config);
+  try{ const sd=parseD(me.config.serverNow); if(sd) state.clockSkew=Math.round((Date.now()-sd.getTime())/60000); }catch(_){ state.clockSkew=0; }
+  try{ state.users=(await api('/api/users')).users; }catch(_){ state.users=[]; }
+  const allowed=navItems().map(n=>n[0]).concat(['lead','search','myleads','leads']);
+  state.route=allowed.includes(sv.route)?sv.route:'dashboard';
+  state.params=sv.params||{};
+  try{ await loadRouteData(); }
+  catch(_){ state.route='dashboard'; state.params={}; try{ await loadRouteData(); }catch(_){} }
+  render();
+}
 
 /* ============================================================ RENDER ============================================================ */
 const root=()=>document.getElementById('root');
 let waPoll=null;
+let RENDERING=false;
 function render(){
+  if(RENDERING) return;            // re-entrant call (e.g. a blur handler fired mid-render)
+  RENDERING=true;
+  try{ paint(); } finally { RENDERING=false; }
+}
+function paint(){
   if(!state.user){ root().innerHTML=renderLogin(); return; }
   root().innerHTML=renderShell(pageContent());
   if(state.toastMsg){ showToast(state.toastMsg); state.toastMsg=''; }
@@ -593,6 +637,20 @@ function render(){
       render();
     }, 4000);
   } else if(waPoll){ clearInterval(waPoll); waPoll=null; }
+}
+
+/* Re-render without stealing the caret from whatever field is focused.
+   render() replaces the whole page, so a naive redraw-per-keystroke made the
+   cursor jump in the Team search box (item 4). */
+function renderKeepFocus(){
+  const ae=document.activeElement;
+  const id=ae&&ae.id; let st=null,en=null;
+  try{ st=ae.selectionStart; en=ae.selectionEnd; }catch(_){}
+  render();
+  if(!id) return;
+  const nb=document.getElementById(id); if(!nb) return;
+  try{ nb.focus({preventScroll:true}); }catch(_){ try{ nb.focus(); }catch(__){} }
+  if(st!=null){ try{ nb.setSelectionRange(st,en); }catch(_){} }
 }
 
 function renderLogin(){
@@ -919,7 +977,10 @@ function renderLeads(mineOnly){
     <button class="btn ghost sm" data-action="pageprev" ${page<=1?'style="opacity:.4;pointer-events:none"':''}>‹ Prev</button>
     <span class="lead-sub">Page ${page} / ${totalPages} <span style="color:var(--muted)">(showing ${start+1}–${Math.min(start+size,ls.length)} of ${ls.length})</span></span>
     <button class="btn ghost sm" data-action="pagenext" ${page>=totalPages?'style="opacity:.4;pointer-events:none"':''}>Next ›</button></div>`:'';
-  return `<div class="page-h"><h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
+  /* item 3 — arrived here by clicking a row/number in a report? Offer the way
+     back to that exact screen instead of making them re-navigate and re-filter. */
+  const backBtn=state.drillFrom?`<button class="btn ghost sm" data-action="drillback" style="margin-right:10px">← Back to ${esc(state.drillFrom.label||'Reports')}</button>`:'';
+  return `<div class="page-h">${backBtn}<h2>${title}</h2><span class="cnt">${ls.length} leads</span>${importBtn}</div>
     ${filterBar(showOwner)}${tools}${table}<div class="cards">${cards||'<div class="lcard" style="text-align:center;color:var(--muted)">No leads found</div>'}</div>${pageBar}`;
 }
 
@@ -1105,9 +1166,31 @@ function renderConnectors(){
   const tog=(k,lbl,desc)=>`<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)">
     <div style="flex:1"><div style="font-weight:700">${lbl}</div><div class="lead-sub">${desc}</div></div>
     <button class="btn ${au[k]?'':'ghost'} sm" data-action="toggleauto" data-akey="${k}" data-val="${au[k]?0:1}">${au[k]?'ON':'OFF'}</button></div>`;
+  /* ---------- Routing: which lead source feeds which product ----------
+     A source now carries its own product, so anything added later ("New
+     Lead", "Justdial") can be pointed at the right team instead of silently
+     landing in the default one. Click a chip to rename / recolour / move /
+     delete it; the connectors line below stays as the fallback route.   */
+  const srcAll=(CFG().sources||[]);
+  const srcChipBtn=sc=>`<span class="pill" data-action="editsource" data-sname="${esc(sc.name)}"
+      title="Edit, move or delete ${esc(sc.name)}"
+      style="cursor:pointer;background:${esc(sc.color||'#6b7488')}1f;color:${esc(sc.color||'#6b7488')};font-weight:700;display:inline-flex;align-items:center;gap:5px">
+      <span class="si" style="background:${esc(sc.color||'#6b7488')}">${esc(sc.icon||'?')}</span>${esc(sc.name)} <span style="opacity:.6">✎</span></span>`;
   const routeRows=Object.keys(CFG().teams).map(tk=>{const ags=salesUsers().filter(u=>u.team===tk).map(u=>u.name).join(', ')||'—';
-    const srcs=state.connectors.filter(c=>c.team===tk&&c.connected).map(c=>c.key).join(', ')||'—';
-    return `<tr><td><span class="pill">${tk}</span> ${teamName(tk)}</td><td>${srcs}</td><td class="lead-sub">${ags}</td></tr>`;}).join('');
+    const mine=srcAll.filter(sc=>sc.team===tk);
+    const conns=state.connectors.filter(c=>c.team===tk&&c.connected).map(c=>c.name).join(', ');
+    return `<tr><td style="white-space:nowrap"><span class="pill">${tk}</span> ${teamName(tk)}</td>
+      <td><div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+        ${mine.map(srcChipBtn).join('')||'<span class="lead-sub">no source routed here yet</span>'}
+        <button class="btn ghost sm" data-action="addsource" data-team="${tk}">+ Source</button></div>
+        ${conns?`<div class="lead-sub" style="margin-top:5px">also via connector: ${esc(conns)}</div>`:''}</td>
+      <td class="lead-sub">${esc(ags)}</td></tr>`;}).join('');
+  const unrouted=srcAll.filter(sc=>!sc.team||!CFG().teams[sc.team]);
+  const unroutedRow=unrouted.length?`<tr style="background:#fff8ef">
+      <td style="white-space:nowrap"><span class="pill" style="background:#ffe8cc;color:#c77700">—</span> Not routed</td>
+      <td><div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${unrouted.map(srcChipBtn).join('')}</div>
+        <div class="lead-sub" style="margin-top:5px">These fall back to their connector's product, or to the default one. Click a chip to point it at a product.</div></td>
+      <td class="lead-sub">—</td></tr>`:'';
   return `<div class="page-h"><h2>Sources & Automation</h2></div>
     <div class="page-h" style="margin-top:4px"><h2 style="font-size:15px">🔌 Lead Connectors</h2><span class="cnt">where leads come from</span></div>
     <div class="grid2">${cards}</div>
@@ -1118,15 +1201,18 @@ function renderConnectors(){
         ${tog('autoRnrOnMiss','Missed call → Auto RNR','On no-answer, move lead to RNR + set reminder')}
         ${tog('autoFollowup','Auto follow-up reminder','Keeps a follow-up reminder alive until the lead is closed')}
       </div></div>
-      <div class="panel"><div class="panel-h">🎯 Routing — Product / Team<button class="btn sm" data-action="addproduct">+ Add Product</button></div>
-        <div style="overflow-x:auto"><table><thead><tr><th>Product / Team</th><th>Sources</th><th>Round-robin agents</th></tr></thead>
-        <tbody>${routeRows}</tbody></table></div></div></div>`;
+      <div class="panel"><div class="panel-h">🎯 Routing — Product / Team
+        <span style="display:flex;gap:6px"><button class="btn ghost sm" data-action="addsource">+ Add Source</button>
+        <button class="btn sm" data-action="addproduct">+ Add Product</button></span></div>
+        <div style="overflow-x:auto"><table><thead><tr><th>Product / Team</th><th>Sources <span class="lead-sub" style="font-weight:400">— click a chip to edit / move / delete</span></th><th>Round-robin agents</th></tr></thead>
+        <tbody>${routeRows}${unroutedRow}</tbody></table></div>
+        <div class="panel-b lead-sub" style="padding-top:8px">A new lead goes to the product of its source, and is round-robined among that product's agents. A source with no product falls back to its connector.</div></div></div>`;
 }
 
 /* ---------------- SETTINGS (Admin) ---------------- */
 function renderSettings(){
   const s=state.settings||{}; const t={leads:s.target_leads||200,interested:s.target_interested||60,closed:s.target_closed||20};
-  const srcRows=(CFG().sources||[]).map(x=>`<span class="src" style="margin:4px 8px 4px 0"><span class="si" style="background:${x.color}">${x.icon}</span>${esc(x.name)}</span>`).join('');
+  const srcRows=(CFG().sources||[]).map(x=>`<span class="src" style="margin:4px 8px 4px 0;cursor:pointer" data-action="editsource" data-sname="${esc(x.name)}" title="Edit / move / delete"><span class="si" style="background:${esc(x.color||'#6b7488')}">${esc(x.icon||'?')}</span>${esc(x.name)}${x.team&&CFG().teams[x.team]?` <span class="lead-sub">→ ${teamCode(x.team)}</span>`:''}</span>`).join('');
   return `<div class="page-h"><h2>Settings</h2></div>
     <div class="grid2">
       <div class="panel"><div class="panel-h">🎯 Targets — per agent / vertical</div><div class="panel-b">
@@ -1141,7 +1227,7 @@ function renderSettings(){
         <button class="btn block" style="margin-top:10px" data-action="savewaprod">Save WhatsApp routing</button></div></div>
       <div class="panel"><div class="panel-h">📥 Lead Sources<button class="btn sm" data-action="addsource">+ Add Source</button></div>
         <div class="panel-b"><div style="display:flex;flex-wrap:wrap">${srcRows}</div>
-        <div class="lead-sub" style="margin-top:10px">Add a new source (Instagram, Justdial, etc.) — it will appear in the lead form and reports.</div></div></div>
+        <div class="lead-sub" style="margin-top:10px">Add a new source (Instagram, Justdial, etc.) — it will appear in the lead form and reports. Click any source to rename it, change its colour, point it at a product, or remove it.</div></div></div>
     </div>
     <div class="panel" style="margin-top:16px"><div class="panel-h">Quick actions</div><div class="panel-b" style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn ghost" data-action="adduser">👥 Add User</button>
@@ -1379,13 +1465,35 @@ function downloadSampleCsv(){
   const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download='leads-sample.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
-function addSourceModal(){
+const productOptions=(sel,noneLabel)=>(noneLabel?`<option value="">${noneLabel}</option>`:'')
+  +Object.keys(CFG().teams||{}).map(k=>`<option value="${k}" ${sel===k?'selected':''}>${teamName(k)}</option>`).join('');
+
+function addSourceModal(team){
   openModal(`<div class="modal"><div class="modal-h"><h3>+ Add Lead Source</h3><span class="x" data-action="closemodal">×</span></div>
     <div class="modal-b">
       <div class="field"><label>Source name</label><input id="ns_name" placeholder="e.g. Instagram / Justdial"></div>
       <div class="field"><label>Short icon (1–2 letters)</label><input id="ns_icon" maxlength="2" placeholder="Ig"></div>
       <div class="field"><label>Colour</label><input id="ns_color" type="color" value="#2d5be3" style="height:44px;padding:4px"></div>
+      <div class="field"><label>Route its leads to <span class="lead-sub">(product / team)</span></label>
+        <select id="ns_team">${productOptions(team||'','— none (use the connector) —')}</select></div>
       <button class="btn block" data-action="savesource">Add Source</button></div></div>`);
+}
+/* one place to rename a source, recolour it, move it to another product, or
+   remove it. A rename carries every existing lead with it (server side), so
+   old leads never end up pointing at a source that no longer exists. */
+function editSourceModal(name){
+  const sc=(CFG().sources||[]).find(x=>x.name===name); if(!sc) return;
+  const used=(state.leads||[]).filter(l=>l.source===name).length;
+  openModal(`<div class="modal"><div class="modal-h"><h3>Edit source — ${esc(sc.name)}</h3><span class="x" data-action="closemodal">×</span></div>
+    <div class="modal-b">
+      <div class="field"><label>Source name</label><input id="es_name" value="${esc(sc.name)}"></div>
+      <div class="field"><label>Short icon (1–2 letters)</label><input id="es_icon" maxlength="2" value="${esc(sc.icon||'')}"></div>
+      <div class="field"><label>Colour</label><input id="es_color" type="color" value="${esc(sc.color||'#6b7488')}" style="height:44px;padding:4px"></div>
+      <div class="field"><label>Route its leads to <span class="lead-sub">(product / team)</span></label>
+        <select id="es_team">${productOptions(sc.team||'','— none (use the connector) —')}</select></div>
+      <div class="lead-sub" style="margin-bottom:12px">Renaming also renames this source on every lead that already has it${used?' (at least '+used+' on this screen)':''}. Changing the product only affects <b>new</b> leads.</div>
+      <button class="btn block" data-action="saveeditsource" data-sname="${esc(sc.name)}">Save source</button>
+      <button class="btn block ghost" style="margin-top:8px;color:var(--red);border-color:#ffd0cf" data-action="deletesource" data-sname="${esc(sc.name)}">🗑️ Delete this source</button></div></div>`);
 }
 
 /* ---------------- REPORTS (Admin, downloadable) ---------------- */
@@ -1681,7 +1789,8 @@ function renderLeadDetail(){
   const timeline=(l.activities||[]).slice().reverse().map(a=>`<li><div class="tt">${esc(a.title)}</div>
     <div class="tm">${fmtDateTime(a.created_at)} • ${esc(a.by_name)}${a.sub?' • '+esc(a.sub):''}</div></li>`).join('');
   const wonBadge=l.converted?`<span class="convo">✓ Pushed to Customer CRM</span>`:'';
-  return `<div class="page-h"><a data-nav="back" style="font-weight:700">← Back</a></div>
+  const drillBack=state.drillFrom?` <span class="lead-sub">•</span> <a data-action="drillback" style="font-weight:700">↩ ${esc(state.drillFrom.label||'Reports')}</a>`:'';
+  return `<div class="page-h"><a data-nav="back" style="font-weight:700">← Back</a>${drillBack}</div>
   <div class="ld-head"><div class="r1"><div class="ld-avatar">${initials(l.name)}</div>
     <div style="flex:1"><h2>${esc(l.name)}</h2>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
@@ -2013,6 +2122,9 @@ document.addEventListener('click',async function(e){
     if(a==='msall'){ const id=act.dataset.ms; const f=MS_FIELDS[id];
       const all=[...document.querySelectorAll('.ms-box[data-ms="'+id+'"]')].map(b=>b.dataset.val);
       if(f) f.set(all); return render(); }
+    if(a==='drillback'){ const d=state.drillFrom; state.drillFrom=null;
+      if(d&&d.tab) state.reportTab=d.tab;
+      return go(d?d.route:'dashboard'); }
     if(a==='pick'){ return; }
     if(a==='pageprev'){ state.leadPage=Math.max(1,(state.leadPage||1)-1); return render(); }
     if(a==='pagenext'){ state.leadPage=(state.leadPage||1)+1; return render(); }
@@ -2048,10 +2160,26 @@ document.addEventListener('click',async function(e){
       const me=await api('/api/me'); setCfg(me.config); closeModal();
       state.toastMsg='Product added: '+r.code; return refresh();
     }
-    if(a==='addsource'){ return addSourceModal(); }
+    if(a==='addsource'){ return addSourceModal(act.dataset.team||''); }
     if(a==='savesource'){ const name=gv('ns_name'); if(!name){alert('Enter a name');return;}
-      await api('/api/sources','POST',{name,icon:gv('ns_icon')||name.slice(0,2),color:document.getElementById('ns_color').value});
+      const r=await api('/api/sources','POST',{name,icon:gv('ns_icon')||name.slice(0,2),
+        color:document.getElementById('ns_color').value, team:(document.getElementById('ns_team')||{}).value||''});
+      if(r&&r.error){alert(r.error);return;}
       const me=await api('/api/me'); setCfg(me.config); closeModal(); state.toastMsg='Source added: '+name; return refresh(); }
+    if(a==='editsource'){ return editSourceModal(act.dataset.sname); }
+    if(a==='saveeditsource'){ const cur=act.dataset.sname; const name=gv('es_name'); if(!name){alert('Enter a name');return;}
+      const r=await api('/api/sources/'+encodeURIComponent(cur),'PATCH',{name,icon:gv('es_icon'),
+        color:document.getElementById('es_color').value, team:(document.getElementById('es_team')||{}).value||''});
+      if(r&&r.error){alert(r.error);return;}
+      const me=await api('/api/me'); setCfg(me.config); closeModal();
+      state.toastMsg='Source saved'+(r.renamedLeads?' — renamed on '+r.renamedLeads+' lead(s)':''); return refresh(); }
+    if(a==='deletesource'){ const nm=act.dataset.sname;
+      if(!confirm('Remove the source "'+nm+'"?\n\nIt disappears from the lead form, filters and routing. Leads that already carry it keep their label and stay in the reports.')) return;
+      const r=await api('/api/sources/'+encodeURIComponent(nm),'DELETE');
+      if(r&&r.error){alert(r.error);return;}
+      const me=await api('/api/me'); setCfg(me.config); closeModal();
+      state.toastMsg=r.retired?'Source removed from the lists — '+r.leads+' existing lead(s) keep it':'Source deleted';
+      return refresh(); }
     if(a==='savewaprod'){ const wp=(document.getElementById('st_waprod')||{}).value||'';
       const r=await api('/api/settings','PATCH',{whatsapp_product:wp}); if(r.error){alert(r.error);return;}
       const me=await api('/api/me'); setCfg(me.config); state.toastMsg='🟢 WhatsApp leads → '+wp; return refresh(); }
@@ -2121,6 +2249,11 @@ document.addEventListener('click',async function(e){
   }
   const drill=e.target.closest('[data-drill],[data-drillowner]');
   if(drill){ const d=drill.dataset;
+    /* item 3 — remember the screen this drill started from (and which report
+       tab), so the leads page can offer a one-click way back to it. */
+    state.drillFrom=['reports','dashboard','followups'].includes(state.route)
+      ? {route:state.route, tab:state.reportTab, label:state.route==='reports'?'Reports':state.route==='followups'?'Follow-ups':'Dashboard'}
+      : null;
     state.filters={q:'',status:d.fstatus||d.drillstatus||'',source:d.fsource||'',owner:d.fowner||d.drillowner||'',product:d.fproduct||'',open:d.fopen||'',overdue:d.foverdue||'',duetoday:d.fduetoday||''};
     return go('leads'); }
   const lead=e.target.closest('[data-lead]');
@@ -2174,7 +2307,10 @@ document.addEventListener('change',async function(e){
   if(a==='setowner'){ if(!el.value) return; await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
   if(a==='setproduct'){ const r=await api('/api/leads/'+id,'PATCH',{product:el.value}); if(r&&r.error){alert(r.error);return refresh();}
     state.toastMsg='📦 Product changed to '+teamCode(el.value)+' — pick the new owner'; return refresh(); }
-  if(el.id&&el.id.startsWith('tf_')){ const k={tf_q:'q',tf_role:'role',tf_team:'team',tf_manager:'manager',tf_dept:'dept',tf_status:'status'}[el.id];
+  /* tf_q is owned by the 'input' handler. It must NOT be handled here too:
+     'change' fires on blur, blur happens *during* render(), and re-entering
+     render() from there wiped the focus and moved the caret (item 4). */
+  if(el.id&&el.id.startsWith('tf_')){ const k={tf_role:'role',tf_team:'team',tf_manager:'manager',tf_dept:'dept',tf_status:'status'}[el.id];
     if(k){ state.teamFilter=Object.assign({},state.teamFilter,{[k]:el.value}); return render(); } }
   if(el.classList&&el.classList.contains('closed-check')){ const id=el.dataset.lead;
     if(el.checked) state.closedSel[id]=1; else delete state.closedSel[id];
@@ -2193,13 +2329,18 @@ document.addEventListener('change',async function(e){
 });
 
 let searchTimer=null;
+let teamQTimer=null;
 document.addEventListener('input',function(e){
-  if(e.target.id==='tf_q'){ const pos=e.target.selectionStart;
-    state.teamFilter=Object.assign({},state.teamFilter,{q:e.target.value}); render();
-    const box=document.getElementById('tf_q'); if(box){ box.focus(); try{box.setSelectionRange(pos,pos);}catch(_){} } return; }
+  /* item 4 — the Team page redrew on every single letter, which rebuilt the
+     input and threw the caret around. Record the text now, redraw once the
+     typing pauses, and put the caret back exactly where it was. */
+  if(e.target.id==='tf_q'){
+    state.teamFilter=Object.assign({},state.teamFilter,{q:e.target.value});
+    clearTimeout(teamQTimer); teamQTimer=setTimeout(renderKeepFocus,220); return; }
   if(e.target.id==='fq'){ state.filters.q=e.target.value; clearTimeout(searchTimer);
     searchTimer=setTimeout(async()=>{ const box=document.getElementById('fq'); const pos=box?box.selectionStart:null;
-      await refresh(); const nb=document.getElementById('fq'); if(nb){ nb.focus(); if(pos!=null){try{nb.setSelectionRange(pos,pos);}catch(_){}} } },250); }
+      await refresh(); const nb=document.getElementById('fq');
+      if(nb){ try{ nb.focus({preventScroll:true}); }catch(_){ nb.focus(); } if(pos!=null){try{nb.setSelectionRange(pos,pos);}catch(_){}} } },250); }
 });
 
 document.addEventListener('keydown',function(e){
@@ -2220,8 +2361,8 @@ setInterval(function(){
   refresh();
 }, 15000);
 
-/* boot */
-render();
+/* boot — restores the session if there is one, else shows the login screen */
+boot();
 </script>
 </body>
 </html>
