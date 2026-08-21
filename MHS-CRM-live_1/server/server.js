@@ -190,8 +190,11 @@ function createLead(data, byName, opts = {}) {
   if (dupPhone) return { lead: dupPhone, deduped: true };
   const phoneNorm = normPhone(data.phone);
   const source = data.source || 'Manual';
+  /* Routing order: an explicit product on the payload, then the source's own
+     product (Sources -> Routing), then the source's connector, then MHS. */
+  const srcRow = db.prepare('SELECT team FROM sources WHERE name=?').get(source);
   const conn = connectorForSource(source);
-  const product = data.product || (conn ? conn.team : 'MHS');
+  const product = data.product || (srcRow && srcRow.team) || (conn ? conn.team : 'MHS');
   let ownerId = data.owner_id || null;
   let assignNote = ownerId ? 'Assigned to ' + (userById(ownerId)?.name || ownerId) : '';
   if (!ownerId && (opts.autoAssign ?? autoOn('roundRobin'))) {
@@ -765,13 +768,66 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true });
       }
 
-      // lead sources
+      // lead sources — add / update (incl. rename + routing) / delete
       if (p === '/api/sources' && m === 'POST') {
         if (user.role !== 'admin') return err(res, 403, 'admin only');
         const b = await readBody(req);
-        if (!b.name) return err(res, 400, 'name required');
-        db.prepare('INSERT OR REPLACE INTO sources(name,color,icon,active) VALUES(?,?,?,1)').run(b.name, b.color || '#6b7488', b.icon || String(b.name).slice(0, 2));
-        return send(res, 200, { ok: true });
+        const name = String(b.name || '').trim();
+        if (!name) return err(res, 400, 'name required');
+        if (b.team && !getTeams()[b.team]) return err(res, 400, 'unknown product: ' + b.team);
+        const exists = db.prepare('SELECT * FROM sources WHERE name=?').get(name);
+        // keep whatever the caller did not send (a plain re-add must not wipe the routing)
+        const color = b.color || (exists && exists.color) || '#6b7488';
+        const icon = b.icon || (exists && exists.icon) || name.slice(0, 2);
+        const team = b.team !== undefined ? (b.team || null) : (exists ? exists.team : null);
+        db.prepare('INSERT OR REPLACE INTO sources(name,color,icon,team,active) VALUES(?,?,?,?,1)').run(name, color, icon, team);
+        return send(res, 200, { ok: true, name });
+      }
+      const srcMm = p.match(/^\/api\/sources\/(.+)$/);
+      if (srcMm && m === 'PATCH') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const cur = decodeURIComponent(srcMm[1]);
+        const row = db.prepare('SELECT * FROM sources WHERE name=?').get(cur);
+        if (!row) return err(res, 404, 'unknown source: ' + cur);
+        const b = await readBody(req);
+        if (b.team !== undefined && b.team && !getTeams()[b.team]) return err(res, 400, 'unknown product: ' + b.team);
+        const next = b.name === undefined ? cur : String(b.name).trim();
+        if (!next) return err(res, 400, 'name cannot be empty');
+        if (next !== cur && db.prepare('SELECT name FROM sources WHERE name=?').get(next)) return err(res, 409, 'a source named "' + next + '" already exists');
+        const color = b.color !== undefined ? b.color : row.color;
+        const icon = b.icon !== undefined ? (b.icon || next.slice(0, 2)) : row.icon;
+        const team = b.team !== undefined ? (b.team || null) : row.team;
+        const active = b.active !== undefined ? (b.active ? 1 : 0) : row.active;
+        let moved = 0;
+        if (next !== cur) {
+          /* A rename has to carry the leads with it, otherwise every existing
+             lead keeps a source name that no longer exists in the list and
+             disappears from the source filter and the source-wise report. */
+          db.prepare('DELETE FROM sources WHERE name=?').run(cur);
+          db.prepare('INSERT INTO sources(name,color,icon,team,active) VALUES(?,?,?,?,?)').run(next, color, icon, team, active);
+          moved = db.prepare('UPDATE leads SET source=? WHERE source=?').run(next, cur).changes;
+          db.prepare('UPDATE connectors SET src=? WHERE src=?').run(next, cur);
+        } else {
+          db.prepare('UPDATE sources SET color=?, icon=?, team=?, active=? WHERE name=?').run(color, icon, team, active, cur);
+        }
+        return send(res, 200, { ok: true, name: next, renamedLeads: moved });
+      }
+      if (srcMm && m === 'DELETE') {
+        if (user.role !== 'admin') return err(res, 403, 'admin only');
+        const name = decodeURIComponent(srcMm[1]);
+        const row = db.prepare('SELECT * FROM sources WHERE name=?').get(name);
+        if (!row) return err(res, 404, 'unknown source: ' + name);
+        const used = db.prepare('SELECT COUNT(*) n FROM leads WHERE source=? AND deleted=0').get(name).n;
+        /* Leads already carry this source name. Hard-deleting the row would
+           leave those leads with an unknown source, so the row is retired
+           (active=0) instead: it leaves every picker and filter, old leads
+           keep their label, and their history stays readable. */
+        if (used) {
+          db.prepare('UPDATE sources SET active=0 WHERE name=?').run(name);
+          return send(res, 200, { ok: true, retired: true, leads: used });
+        }
+        db.prepare('DELETE FROM sources WHERE name=?').run(name);
+        return send(res, 200, { ok: true, removed: true, leads: 0 });
       }
 
       // settings (targets)
@@ -1264,7 +1320,7 @@ function getTeams() {
   const rows = db.prepare('SELECT code,name,color FROM teams WHERE active=1 ORDER BY code').all();
   const o = {}; rows.forEach(r => o[r.code] = { name: r.name, code: r.code, color: r.color }); return o;
 }
-function getSources() { return db.prepare('SELECT name,color,icon FROM sources WHERE active=1 ORDER BY rowid').all(); }
+function getSources() { return db.prepare('SELECT name,color,icon,team FROM sources WHERE active=1 ORDER BY rowid').all(); }
 function getSettings() {
   const rows = db.prepare('SELECT key,value FROM settings').all();
   const s = {}; rows.forEach(r => s[r.key] = r.value); return s;

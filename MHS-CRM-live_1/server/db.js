@@ -218,6 +218,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_assign_time ON lead_assignments(created_at);
 `);
 
+/* ---------- lead source -> product routing ----------
+   Routing used to live only on the six built-in connectors (connectors.team),
+   so a source added later ("New Lead", "Justdial") had nowhere to say which
+   product its leads belong to and silently fell back to MHS. A source now
+   carries its own product; the connector stays as the fallback.        */
+try { db.exec('ALTER TABLE sources ADD COLUMN team TEXT'); } catch (e) {}
+/* seed each source's product from its connector once, so nothing changes
+   behaviour on the day this ships */
+try {
+  const done = db.prepare("SELECT value FROM settings WHERE key='src_team_v1'").get();
+  if (!done) {
+    const rows = db.prepare("SELECT s.name n, (SELECT c.team FROM connectors c WHERE c.src=s.name ORDER BY c.connected DESC LIMIT 1) t FROM sources s").all();
+    const upd = db.prepare('UPDATE sources SET team=? WHERE name=?');
+    let n = 0;
+    for (const r of rows) if (r.t) { upd.run(r.t, r.n); n++; }
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('src_team_v1','1')").run();
+    console.log('source routing: ' + n + ' source(s) mapped to their connector product');
+  }
+} catch (e) { console.error('source routing migration failed:', e.message); }
+
 /* ---------- 'Pre Sales' lead source ---------- */
 try { db.prepare("INSERT OR IGNORE INTO sources(name,color,icon) VALUES('Pre Sales','#00b8d9','PS')").run(); } catch (e) {}
 
