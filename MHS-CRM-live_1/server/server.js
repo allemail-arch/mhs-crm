@@ -307,6 +307,27 @@ function myReminders(user, limit) {
               upcoming: out.filter(x => x.bucket === 'upcoming').length } };
 }
 
+/* ---------------- Pre-Sales hand-over ----------------
+   Pre Sales qualifies a raw lead on the phone and then passes it to the Sales
+   POC who will actually close it. That POC sits in a DIFFERENT product, so the
+   hand-over has to cross both the product and the owner boundary — which no
+   Sales agent could do before. Products are matched by code/name rather than a
+   hard-coded key, so renaming or re-coding the Pre Sales product keeps working. */
+function presalesProducts() {
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return db.prepare('SELECT code,name FROM teams WHERE active=1').all()
+    .filter(t => {
+      const c = norm(t.code), n = norm(t.name);
+      return c === 'ps' || c === 'pre' || c === 'presales' || n === 'presales' || n.startsWith('presales');
+    })
+    .map(t => t.code);
+}
+/* a Pre-Sales POC may hand over. Every other Sales agent still cannot move
+   their leads anywhere — that stays a manager action. */
+function canHandover(user) {
+  return user.role === 'sales' && presalesProducts().includes(user.team);
+}
+
 /* ---------------- reporting tree / data scope ----------------
    Roles, top to bottom:
      admin  — sees everything
@@ -1171,14 +1192,29 @@ const server = http.createServer(async (req, res) => {
         if (b.product !== undefined && b.product !== lead.product) {
           const teams = getTeams();
           if (!teams[b.product]) return err(res, 400, 'unknown product: ' + b.product);
+          // a Sales agent may only move a product as part of a Pre-Sales hand-over
+          if (user.role === 'sales' && !canHandover(user)) return err(res, 403, 'Only a manager can change the product');
           db.prepare('UPDATE leads SET product=? WHERE id=?').run(b.product, lead.id);
           logAct(lead.id, '📦 Product: ' + (lead.product || '—') + ' → ' + b.product, '', user.name);
         }
         if (b.owner_id && b.owner_id !== lead.owner_id) {
+          /* Who may move a lead to someone else: a manager inside their own
+             scope (unchanged), plus a Pre-Sales POC passing THEIR OWN lead to
+             an active Sales POC outside Pre Sales. Everything else is refused
+             here, not just hidden in the UI. */
+          if (user.role === 'sales') {
+            if (!canHandover(user)) return err(res, 403, 'Only Pre Sales can hand a lead over');
+            if (lead.owner_id !== user.id) return err(res, 403, 'You can only hand over your own lead');
+            const dest = userById(b.owner_id);
+            if (!dest || dest.role !== 'sales' || !dest.active) return err(res, 403, 'Hand a lead over to an active Sales POC');
+            if (presalesProducts().includes(dest.team)) return err(res, 403, 'Hand a lead over to a Sales POC outside Pre Sales');
+          }
           const prevOwner = lead.owner_id;
           db.prepare('UPDATE leads SET owner_id=? WHERE id=?').run(b.owner_id, lead.id);
-          logAct(lead.id, '🔁 Reassigned to ' + (userById(b.owner_id)?.name || b.owner_id), '', user.name);
-          logAssign(leadRow(lead.id), prevOwner, b.owner_id, user, 'manual');
+          const destU = userById(b.owner_id);
+          logAct(lead.id, (b.handover ? '➡️ Pre-Sales hand-over → ' : '🔁 Reassigned to ') + (destU?.name || b.owner_id),
+                 b.handover && destU ? 'Now with ' + (getTeams()[destU.team]?.name || destU.team) : '', user.name);
+          logAssign(leadRow(lead.id), prevOwner, b.owner_id, user, b.handover ? 'handover' : 'manual');
         }
         return send(res, 200, { ok: true, lead: leadJSON(leadRow(lead.id), true) });
       }
@@ -1243,6 +1279,17 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/reminders' && m === 'GET') {
         return send(res, 200, myReminders(user, url.searchParams.get('limit')));
       }
+      /* every active Sales POC outside Pre Sales — the hand-over target list.
+         Pre-Sales agents only see themselves in /api/users (by design), so the
+         targets come from here instead of widening that endpoint. */
+      if (p === '/api/handover/agents' && m === 'GET') {
+        if (!(canHandover(user) || MANAGER_ROLES.includes(user.role))) return err(res, 403, 'not allowed');
+        const pre = presalesProducts();
+        const rows = db.prepare("SELECT id,name,team FROM users WHERE role='sales' AND active=1 ORDER BY team, name")
+          .all().filter(u => !pre.includes(u.team));
+        return send(res, 200, { agents: rows });
+      }
+
       // manager-wise team structure (Team page + Super Manager view)
       if (p === '/api/team/structure' && m === 'GET') {
         return send(res, 200, managerTree(user));
@@ -1335,7 +1382,7 @@ function publicConfig() {
   return { teams, products: Object.keys(teams), sources: getSources(), statuses: cfg.STATUS_LIST,
     departments: getDepartments(), teamTarget: at, agentTarget: at,
     whatsappProduct: presalesProduct(), importRoles: IMPORT_ROLES, addLeadRoles: ADD_LEAD_ROLES,
-    callRoles: CALL_ROLES,
+    callRoles: CALL_ROLES, presalesProducts: presalesProducts(),
     roles: ROLES, roleLabels: ROLE_LABEL,
     // the server clock in IST — the UI checks it against the device clock so a
     // wrongly-set laptop can never silently show the wrong dates/times
