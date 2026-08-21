@@ -212,7 +212,7 @@ const state={ token:null, user:null, cfg:null, route:'dashboard', params:{}, log
   leads:[], users:[], connectors:[], automation:{}, reports:{}, currentLead:null,
   filters:{q:'',status:'',source:'',owner:'',product:'',open:'',overdue:'',duetoday:'',todayfresh:'',dateFrom:'',dateTo:''}, dashFilter:{from:'',to:'',source:'',department:'',owner:'',team:''},
   searchQ:'', searchResults:[], reportTab:'daily', dailyDate:'', dailyFrom:'', dailyTo:'', dailyOwner:'', dailyTeam:'', wa:null, toastMsg:'', busy:false, leadPage:1, leadPageSize:25,
-  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0, msOpen:'', drillFrom:null,
+  reminders:null, teamStructure:null, teamView:'tree', clockSkew:0, msOpen:'', drillFrom:null, handoverAgents:null,
   teamFilter:{q:'',role:'',team:'',manager:'',dept:'',status:''},
   closedFilter:{from:'',to:'',type:''}, assignFilter:{from:'',to:'',owner:'',by:'',reason:'',q:''}, closedSel:{} };
 
@@ -234,6 +234,33 @@ const isManagerRole=r=>r==='admin'||r==='super'||r==='lead';
    dialer, the "Call" buttons and "No answer" are hidden for them. The server
    rejects the same roles, so hiding the button is not the only guard. */
 function canCall(){ const r=state.user&&state.user.role; return ((CFG().callRoles)||['admin','sales']).includes(r); }
+
+/* ---------- PRE-SALES → SALES HAND-OVER ----------
+   Pre Sales qualifies the lead on the phone, then passes it to the Sales POC
+   who will close it — and that POC sits in a different product. A Sales agent
+   normally cannot move a lead at all, so this is the one narrow exception:
+   a Pre-Sales POC handing THEIR OWN lead to an active Sales POC outside Pre
+   Sales. The server enforces exactly the same rule.                        */
+const presalesProducts=()=>(CFG().presalesProducts)||[];
+function isPresalesPoc(){ const u=state.user;
+  return !!u && u.role==='sales' && presalesProducts().includes(u.team); }
+/* the POC list comes from its own endpoint: /api/users deliberately shows a
+   Sales agent only themselves, so it cannot supply the targets. */
+async function ensureHandoverAgents(){
+  if(state.handoverAgents!==null) return;
+  try{ state.handoverAgents=(await api('/api/handover/agents')).agents||[]; }
+  catch(_){ state.handoverAgents=[]; }
+}
+/* grouped by product so a long list stays readable */
+function handoverOptionsHTML(selected){
+  const list=state.handoverAgents||[];
+  const byTeam={}; list.forEach(u=>{ (byTeam[u.team]=byTeam[u.team]||[]).push(u); });
+  const groups=Object.keys(byTeam).map(tk=>`<optgroup label="${teamName(tk)}">`
+    +byTeam[tk].map(u=>`<option value="${u.id}" ${selected===u.id?'selected':''}>${esc(u.name)}</option>`).join('')
+    +`</optgroup>`).join('');
+  return `<option value="">— choose a Sales POC —</option>`+groups
+    +(list.length?'':'<option value="" disabled>— no Sales POC available —</option>');
+}
 
 /* ============================================================
    MULTI-SELECT FILTER  (team / product pickers)
@@ -527,6 +554,7 @@ async function loadRouteData(){
     else { state.reports.agents=(await api('/api/reports/agents'+q)).agents; state.reports.activity=(await api('/api/reports/activity'+q)).activity;
       try{ state.teamStructure=await api('/api/team/structure'); }catch(_){} }
   } else if(r==='leads'||r==='myleads'){
+    if(isPresalesPoc()) await ensureHandoverAgents();
     const q=new URLSearchParams(); const f=state.filters;
     if(f.q)q.set('q',f.q); if(f.status)q.set('status',f.status); if(f.source)q.set('source',f.source); if(f.owner)q.set('owner',f.owner); if(f.todayfresh)q.set('todayfresh','1');
     if(f.product)q.set('product',f.product); if(f.open)q.set('open','1'); if(f.overdue)q.set('overdue','1'); if(f.duetoday)q.set('duetoday','1');
@@ -569,6 +597,7 @@ async function loadRouteData(){
     state.connectors=(await api('/api/connectors')).connectors;
     state.automation=(await api('/api/automation')).automation;
   } else if(r==='lead'){
+    if(isPresalesPoc()) await ensureHandoverAgents();
     state.currentLead=(await api('/api/leads/'+state.params.id)).lead;
   }
 }
@@ -1668,7 +1697,7 @@ function renderReports(){
   /* ---------- item 10: LEAD ASSIGNMENT HISTORY ---------- */
   const ah=state.reports.assignments||{total:0,rows:[],byUser:[],toUser:[]};
   const af=state.assignFilter||{};
-  const REASONS=[['','All actions'],['manual','Manual assign'],['round-robin','Round robin'],['import','Bulk import'],['bulk','Bulk reassign'],['transfer','User transfer'],['webhook','Auto capture']];
+  const REASONS=[['','All actions'],['manual','Manual assign'],['handover','Pre-Sales hand-over'],['round-robin','Round robin'],['import','Bulk import'],['bulk','Bulk reassign'],['transfer','User transfer'],['webhook','Auto capture']];
   const ahRows=(ah.rows||[]).slice(0,400).map(r=>`<tr ${r.lead_id?`data-lead="${r.lead_id}" style="cursor:pointer"`:''}>
       <td class="lead-sub" style="white-space:nowrap">${fmtDateTime(r.created_at)}</td>
       <td><div class="lead-nm">${esc(r.lead_name||'—')}</div><div class="lead-sub">${esc(r.phone||'')}${r.product?' • '+teamCode(r.product):''}</div></td>
@@ -1825,6 +1854,10 @@ function renderLeadDetail(){
         <div class="lead-sub" style="margin-top:5px">${l.next_followup_at?(isDue(l.next_followup_at)?'<span style="color:var(--red)">⏰ '+fmtRemind(l.next_followup_at)+' — '+untilText(l.next_followup_at)+'</span>':'⏰ '+fmtRemind(l.next_followup_at)+' — '+untilText(l.next_followup_at)):'No reminder set'}</div></div>`:''}
       ${canReassign?`<div class="field"><label>Product</label><select id="ld_product" data-action="setproduct" data-lead="${l.id}">${Object.keys(CFG().teams).map(pk=>`<option value="${pk}" ${l.product===pk?'selected':''}>${teamName(pk)}</option>`).join('')}</select></div>
       <div class="field"><label>Assign to (owner) <span class="lead-sub">— agents of this product</span></label><select id="ld_owner" data-action="setowner" data-lead="${l.id}">${ownOpt}</select></div>`:''}
+      ${isPresalesPoc()?`<div class="field" style="background:#f4f8ff;border:1px solid #d6e4ff;border-radius:10px;padding:10px 12px">
+        <label style="font-weight:800">➡️ Hand over to a Sales POC</label>
+        <select data-action="handover" data-lead="${l.id}">${handoverOptionsHTML('')}</select>
+        <div class="lead-sub" style="margin-top:5px">Pick the POC who will close it. The lead's product changes to theirs and it leaves your list — do this once you have qualified it on the call.</div></div>`:''}
       <div class="field"><label>Add note</label><textarea id="noteBox" rows="2" placeholder="Write a call summary…"></textarea></div>
       <button class="btn block" data-action="addnote" data-lead="${l.id}">Save note</button></div></div>
     <div class="panel"><div class="panel-h">Activity Timeline</div><div class="panel-b"><ul class="timeline">${timeline}</ul></div></div></div>`;
@@ -2005,6 +2038,10 @@ function callFlowModal(id){
         <div class="lead-sub" id="cl_remhint" style="margin-top:5px">No reminder set — pick one above or choose your own date &amp; time.</div></div>
       <div class="field"><label>Note <span class="lead-sub">(what was discussed)</span></label>
         <textarea id="cl_note" rows="2" placeholder="e.g. wants pricing, will decide after Diwali"></textarea></div>
+      ${isPresalesPoc()?`<div class="field" style="background:#f4f8ff;border:1px solid #d6e4ff;border-radius:10px;padding:10px 12px">
+        <label style="font-weight:800">➡️ Hand over to a Sales POC <span class="lead-sub" style="font-weight:400">(optional)</span></label>
+        <select id="cl_handover">${handoverOptionsHTML('')}</select>
+        <div class="lead-sub" style="margin-top:5px">Qualified on this call? Pick the POC who will close it — saved together with the call log.</div></div>`:''}
       <button class="btn block" data-action="savecallflow" data-lead="${id}">Save call log</button>
       <div class="lead-sub" style="margin-top:8px;text-align:center">Saved to this lead's timeline, Call History and the daily report.</div>
     </div></div>`);
@@ -2041,6 +2078,15 @@ function editReminderModal(id){
 /* ============================================================ EVENTS ============================================================ */
 const gv=id=>{const e=document.getElementById(id);return e?e.value.trim():'';};
 function findLeadLocal(id){ if(state.currentLead&&state.currentLead.id===id)return state.currentLead; return (state.leads||[]).find(l=>l.id===id); }
+/* Hand a lead to a Sales POC: owner AND product move together in one call, so
+   the lead can never sit in Pre Sales with a Sales owner (or the reverse). */
+async function doHandover(id,toId){
+  const to=(state.handoverAgents||[]).find(u=>u.id===toId);
+  if(!to) return {error:'That POC is no longer available — refresh and try again'};
+  const r=await api('/api/leads/'+id,'PATCH',{owner_id:to.id, product:to.team, handover:1});
+  if(r&&r.error) return {error:r.error};
+  return {name:to.name+' ('+teamCode(to.team)+')'};
+}
 
 document.addEventListener('click',async function(e){
   /* an open multi-select closes on any click outside it. If that click was on
@@ -2254,8 +2300,15 @@ document.addEventListener('click',async function(e){
       if(status) body.status=status;
       const r=await api('/api/leads/'+id+'/call','POST',body);
       if(r.error){ alert(r.error==='reminder_required'?'Please set a reminder for this status.':r.error); return; }
+      /* Pre-Sales: qualified on this call → pass it to the Sales POC in the
+         same step, so the call log and the hand-over never drift apart. */
+      let handTo=(document.getElementById('cl_handover')||{}).value||'';
+      let handMsg='';
+      if(handTo){ const hr=await doHandover(id,handTo);
+        if(hr.error){ alert('Call saved, but the hand-over failed: '+hr.error); }
+        else handMsg=' • handed to '+hr.name; }
       callReset(); closeModal();
-      state.toastMsg='📞 Call logged'+(secs?' — '+fmtDur(secs):'')+(raw?' • reminder '+fmtRemind(raw.replace('T',' ')):'');
+      state.toastMsg='📞 Call logged'+(secs?' — '+fmtDur(secs):'')+(raw?' • reminder '+fmtRemind(raw.replace('T',' ')):'')+handMsg;
       return refresh(); }
     if(a==='wa'){ const l=findLeadLocal(id); const ph=String((l&&l.phone)||'').replace(/\D/g,''); if(ph){try{window.open('https://wa.me/'+ph+'?text='+encodeURIComponent('Hi '+(l?l.name.split(' ')[0]:'')),'_blank');}catch(_){}} await api('/api/leads/'+id+'/whatsapp','POST',{}); state.toastMsg='🟢 Opening WhatsApp…'; return refresh(); }
     if(a==='miss'){ const r=await api('/api/leads/'+id+'/miss','POST',{}); state.toastMsg='📵 No answer → '+(r.steps||[]).join(' + ')+'. Lead kept open.'; return refresh(); }
@@ -2320,6 +2373,13 @@ document.addEventListener('change',async function(e){
   if(a==='setfollow'){ await api('/api/leads/'+id+'/reminder','POST',{next_followup_at:el.value?el.value.replace('T',' '):''});
     state.toastMsg=el.value?'⏰ Reminder set — '+fmtRemind(el.value.replace('T',' ')):'⏰ Reminder cleared'; return refresh(); }
   if(a==='setowner'){ if(!el.value) return; await api('/api/leads/'+id,'PATCH',{owner_id:el.value}); state.toastMsg='Lead reassigned'; return refresh(); }
+  if(a==='handover'){ if(!el.value) return;
+    const to=(state.handoverAgents||[]).find(u=>u.id===el.value);
+    if(!confirm('Hand this lead over to '+(to?to.name:'')+'?\n\nIts product becomes '+(to?teamName(to.team):'')+' and it moves out of your list.')){ el.value=''; return; }
+    const hr=await doHandover(id,el.value);
+    if(hr.error){ alert(hr.error); return refresh(); }
+    state.toastMsg='➡️ Handed over to '+hr.name;
+    return go(state.user.role==='sales'?'myleads':'leads'); }
   if(a==='setproduct'){ const r=await api('/api/leads/'+id,'PATCH',{product:el.value}); if(r&&r.error){alert(r.error);return refresh();}
     state.toastMsg='📦 Product changed to '+teamCode(el.value)+' — pick the new owner'; return refresh(); }
   /* tf_q is owned by the 'input' handler. It must NOT be handled here too:
